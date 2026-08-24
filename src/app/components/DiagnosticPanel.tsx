@@ -132,7 +132,7 @@ export default function DiagnosticPanel() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          query: `{ _meta { block { number } } dlmmPools(first: 1) { id } }`,
+          query: `{ DLMMPool(limit: 1) { id } }`,
         }),
         signal: AbortSignal.timeout(8000),
       });

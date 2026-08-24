@@ -1,7 +1,7 @@
 'use server';
 
-import { NextResponse } from 'next/server';
-import { runIndexer, syncPools } from '@/lib/indexer/dlmmIndexer';
+import { after, NextResponse } from 'next/server';
+import { runIndexer } from '@/lib/indexer/dlmmIndexer';
 import { indexerStore, IndexedPool } from '@/lib/indexer/store';
 
 const CHAIN_ID = 4663;
@@ -13,12 +13,26 @@ let indexerStarted = false;
 async function ensureIndexerRunning() {
   if (indexerStarted) return;
   indexerStarted = true;
-  runIndexer().catch(() => {
+  try {
+    await runIndexer();
+  } catch {
+    // runIndexer records its own error state; keep the API response available.
+  } finally {
     indexerStarted = false;
-  }).finally(() => {
-    indexerStarted = false;
+  }
+}
+
+// Pool discovery can require many subgraph/RPC calls. Never make the first
+// browser request wait for the entire indexer to finish. Next.js `after` lets
+// the server continue that work after the response has been sent.
+async function scheduleIndexer() {
+  after(async () => {
+    await ensureIndexerRunning();
   });
 }
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 /**
  * Converts an IndexedPool to the API response format.
@@ -96,25 +110,16 @@ export async function GET() {
       );
     }
 
-    let indexerState = indexerStore.getState();
-    let rawPools = indexerStore.getAllPools();
+    const indexerState = indexerStore.getState();
+    const rawPools = indexerStore.getAllPools();
 
-    // On a fresh Vercel serverless instance the in-memory store is empty.
-    // Do one synchronous discovery pass so the first request can actually
-    // return real pools instead of returning an empty placeholder response.
-    if (rawPools.length === 0 && indexerState.status !== 'indexing') {
-      try {
-        await syncPools();
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Pool discovery failed';
-        indexerStore.setState({ status: 'error', error: message });
-      }
-      indexerState = indexerStore.getState();
-      rawPools = indexerStore.getAllPools();
-    } else if (rawPools.length > 0) {
-      // Keep live RPC fields fresh on warm instances without blocking the response.
-      void ensureIndexerRunning();
-    }
+    // IMPORTANT: do not synchronously discover pools here. A fresh Vercel
+    // instance may need dozens/hundreds of RPC/subgraph calls, which can make
+    // the API request time out and surface a misleading DATA CONNECTION ERROR
+    // in the dashboard. Return the chain status immediately and let the indexer
+    // continue after the response.
+    // Always keep the indexer moving, but never block this API response on it.
+    await scheduleIndexer();
 
     const pools = rawPools.map(formatPoolForAPI);
 

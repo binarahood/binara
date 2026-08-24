@@ -179,6 +179,13 @@ export function usePoolStream() {
 
     const es = new EventSource('/api/chain/stream');
 
+    // SSE is the primary realtime path, but keep a low-frequency REST fallback
+    // so a newly started serverless instance can populate pools even when the
+    // websocket/subscription is temporarily unavailable.
+    const fallbackRefresh = window.setInterval(() => {
+      fetchPools();
+    }, 30_000);
+
     es.addEventListener('status', (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data);
@@ -256,6 +263,7 @@ export function usePoolStream() {
     };
 
     return () => {
+      window.clearInterval(fallbackRefresh);
       es.close();
     };
   }, [fetchPools]);
