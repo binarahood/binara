@@ -140,15 +140,22 @@ function rawPriceFromBinId(binId: number, binStep: number): number {
 function priceFromBinId(
   binId: number,
   binStep: number,
-  decimalsX = 18,
-  decimalsY = 18,
+  decimalsA = 18,
+  decimalsB = 18,
 ): number {
-  const rawPrice = rawPriceFromBinId(binId, binStep);
-  if (!rawPrice) return 0;
+  const base = 1 + binStep / 10_000;
+  const exponent = binId - 8_388_608;
 
-  const decimalScale = 10 ** (decimalsX - decimalsY);
-  const humanPrice = rawPrice * decimalScale;
-  return Number.isFinite(humanPrice) && humanPrice > 0 ? humanPrice : 0;
+  const rawPrice = Math.pow(base, exponent);
+
+  // DLMM bin price is expressed in raw token units.
+  // Convert it into human-readable token units.
+  const decimalAdjustment = Math.pow(
+    10,
+    decimalsA - decimalsB,
+  );
+
+  return rawPrice * decimalAdjustment;
 }
 
 // ─── Token metadata ───────────────────────────────────────────────────────────
@@ -491,241 +498,106 @@ function estimateTvlFromUSDG(
 
 // ─── Pool enrichment via RPC ──────────────────────────────────────────────────
 
-// ─── Pool enrichment via RPC ──────────────────────────────────────────────────
-
 async function enrichPoolFromRPC(
   pool: IndexedPool
 ): Promise<Partial<IndexedPool>> {
-  let activeBin = pool.activeBin ?? null;
-  let currentPrice = pool.currentPrice ?? null;
-  let reserveX = pool.reserveX;
-  let reserveY = pool.reserveY;
-
-  console.log(
-    `[RPC DEBUG] ${pool.pair} starting enrichment`
-  );
-
-  // ============================================================
-  // 1. GET ACTIVE BIN
-  // ============================================================
   try {
+    // ============================================================
+    // 1. Get active bin
+    // ============================================================
     const activeIdHex = await ethCall(
       pool.address,
       LBPAIR_GET_ACTIVE_ID
     );
 
-    activeBin = decodeUint24(activeIdHex);
+    const activeBin = decodeUint24(activeIdHex);
 
-    currentPrice = priceFromBinId(
-      activeBin,
-      pool.binStep
-    );
+    // ============================================================
+    // 2. Get latest token decimals
+    // ============================================================
+    let decimalsA = pool.decimalsA ?? 18;
+    let decimalsB = pool.decimalsB ?? 18;
 
-    console.log(
-      `[RPC DEBUG] ${pool.pair} ACTIVE BIN:`,
-      {
-        activeBin,
-        currentPrice,
-      }
-    );
-  } catch (err) {
-    console.error(
-      `[RPC DEBUG] ${pool.pair} getActiveId FAILED:`,
-      err
-    );
-  }
+    try {
+      const [metaA, metaB] = await Promise.all([
+        getTokenMetadata(pool.tokenA),
+        getTokenMetadata(pool.tokenB),
+      ]);
 
-  // ============================================================
-  // 2. GET TOTAL RESERVES
-  // ============================================================
-  try {
-    const reservesHex = await ethCall(
-      pool.address,
-      LBPAIR_GET_RESERVES
-    );
-
-    const clean = reservesHex.startsWith('0x')
-      ? reservesHex.slice(2)
-      : reservesHex;
-
-    if (clean.length >= 128) {
-      reserveX = BigInt(
-        '0x' + clean.slice(0, 64)
-      ).toString();
-
-      reserveY = BigInt(
-        '0x' + clean.slice(64, 128)
-      ).toString();
+      decimalsA = metaA.decimals;
+      decimalsB = metaB.decimals;
+    } catch {
+      // Keep existing decimals if metadata lookup fails.
     }
 
-    console.log(
-      `[RPC DEBUG] ${pool.pair} TOTAL RESERVES:`,
-      {
-        reserveX,
-        reserveY,
-      }
+    // ============================================================
+    // 3. Calculate human-readable price
+    // ============================================================
+    const currentPrice = priceFromBinId(
+      activeBin,
+      pool.binStep,
+      decimalsA,
+      decimalsB
     );
-  } catch (err) {
-    console.error(
-      `[RPC DEBUG] ${pool.pair} getReserves FAILED:`,
-      err
-    );
-  }
 
-  // ============================================================
-  // 3. CHECK RESERVE OF ACTIVE BIN
-  // ============================================================
-  if (activeBin !== null) {
+    // ============================================================
+    // 4. Get total reserves
+    // ============================================================
+    let reserveX = pool.reserveX;
+    let reserveY = pool.reserveY;
+
     try {
-      const binIdHex = activeBin
-        .toString(16)
-        .padStart(64, '0');
-
-      const binCall =
-        LBPAIR_GET_BIN + binIdHex;
-
-      const binHex = await ethCall(
+      const reservesHex = await ethCall(
         pool.address,
-        binCall
+        LBPAIR_GET_RESERVES
       );
 
-      const clean = binHex.startsWith('0x')
-        ? binHex.slice(2)
-        : binHex;
+      const clean = reservesHex.startsWith('0x')
+        ? reservesHex.slice(2)
+        : reservesHex;
 
       if (clean.length >= 128) {
-        const binReserveX = BigInt(
+        reserveX = BigInt(
           '0x' + clean.slice(0, 64)
         ).toString();
 
-        const binReserveY = BigInt(
+        reserveY = BigInt(
           '0x' + clean.slice(64, 128)
         ).toString();
-
-        console.log(
-          `[RPC DEBUG] ${pool.pair} ACTIVE BIN ${activeBin}:`,
-          {
-            binReserveX,
-            binReserveY,
-          }
-        );
       }
-    } catch (err) {
-      console.error(
-        `[RPC DEBUG] ${pool.pair} getBin FAILED:`,
-        err
-      );
+    } catch {
+      // Keep existing reserves if RPC reserve call fails.
     }
-  }
 
-  // ============================================================
-  // 4. FIND NEXT NON-EMPTY BINS
-  // ============================================================
-  if (activeBin !== null) {
-    for (const swapForY of [true, false]) {
-      try {
-        const boolHex = swapForY
-          ? '1'.padStart(64, '0')
-          : '0'.padStart(64, '0');
-
-        const binIdHex = activeBin
-          .toString(16)
-          .padStart(64, '0');
-
-        const nextBinCall =
-          LBPAIR_GET_NEXT_NON_EMPTY_BIN +
-          boolHex +
-          binIdHex;
-
-        const nextBinHex = await ethCall(
-          pool.address,
-          nextBinCall
-        );
-
-        const nextBin = decodeUint24(
-          nextBinHex
-        );
-
-        console.log(
-          `[RPC DEBUG] ${pool.pair} NEXT NON-EMPTY BIN:`,
-          {
-            swapForY,
-            activeBin,
-            nextBin,
-          }
-        );
-
-        // 0 and uint24 max mean there is no usable next bin.
-        if (
-          nextBin !== 0 &&
-          nextBin !== 16_777_215
-        ) {
-          const nextBinIdHex = nextBin
-            .toString(16)
-            .padStart(64, '0');
-
-          const nextBinCallData =
-            LBPAIR_GET_BIN + nextBinIdHex;
-
-          const nextBinHexData = await ethCall(
-            pool.address,
-            nextBinCallData
-          );
-
-          const clean = nextBinHexData.startsWith('0x')
-            ? nextBinHexData.slice(2)
-            : nextBinHexData;
-
-          if (clean.length >= 128) {
-            const nextReserveX = BigInt(
-              '0x' + clean.slice(0, 64)
-            ).toString();
-
-            const nextReserveY = BigInt(
-              '0x' + clean.slice(64, 128)
-            ).toString();
-
-            console.log(
-              `[RPC DEBUG] ${pool.pair} NEXT BIN ${nextBin}:`,
-              {
-                nextReserveX,
-                nextReserveY,
-              }
-            );
-          }
-        }
-      } catch (err) {
-        console.error(
-          `[RPC DEBUG] ${pool.pair} getNextNonEmptyBin FAILED:`,
-          {
-            swapForY,
-            error: err,
-          }
-        );
+    console.log(
+      `[RPC DEBUG] ${pool.pair} FINAL:`,
+      {
+        activeBin,
+        currentPrice,
+        reserveX,
+        reserveY,
+        decimalsA,
+        decimalsB,
       }
-    }
-  }
+    );
 
-  // ============================================================
-  // 5. FINAL RESULT
-  // ============================================================
-  console.log(
-    `[RPC DEBUG] ${pool.pair} FINAL:`,
-    {
+    return {
       activeBin,
       currentPrice,
       reserveX,
       reserveY,
-    }
-  );
+      decimalsA,
+      decimalsB,
+      updatedAt: Date.now(),
+    };
+  } catch (err) {
+    console.error(
+      `[RPC DEBUG] ${pool.pair} enrichment FAILED:`,
+      err
+    );
 
-  return {
-    activeBin,
-    currentPrice,
-    reserveX,
-    reserveY,
-    updatedAt: Date.now(),
-  };
+    return {};
+  }
 }
 
 // ─── Analytics scoring ────────────────────────────────────────────────────────
