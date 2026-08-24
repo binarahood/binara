@@ -7,6 +7,31 @@ import { indexerStore, IndexedPool } from '@/lib/indexer/store';
 const CHAIN_ID = 4663;
 const RPC_URL = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
 
+async function rpcCall(method: string, params: unknown[] = []): Promise<unknown> {
+  const res = await fetch(RPC_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    cache: 'no-store',
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (!res.ok) {
+    throw new Error(`RPC HTTP ${res.status}`);
+  }
+
+  const data = await res.json();
+  if (data?.error) {
+    throw new Error(`RPC error: ${data.error.message || 'Unknown RPC error'}`);
+  }
+
+  if (data?.result === undefined) {
+    throw new Error('RPC returned no result');
+  }
+
+  return data.result;
+}
+
 // Track whether a background refresh is already running in this warm process.
 let indexerStarted = false;
 
