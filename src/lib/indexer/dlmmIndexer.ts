@@ -489,18 +489,30 @@ function estimateTvlFromUSDG(
 
 // ─── Pool enrichment via RPC ──────────────────────────────────────────────────
 
-async function enrichPoolFromRPC(pool: IndexedPool): Promise<Partial<IndexedPool>> {
+async function enrichPoolFromRPC(
+  pool: IndexedPool
+): Promise<Partial<IndexedPool>> {
   let activeBin = pool.activeBin ?? null;
   let currentPrice = pool.currentPrice ?? null;
   let reserveX = pool.reserveX;
   let reserveY = pool.reserveY;
 
-  // 1. Try active bin independently.
-  // If this fails, we still continue to read reserves.
+  console.log(
+    `[RPC DEBUG] ${pool.pair} (${pool.address}) starting enrichment`
+  );
+
+  // ============================================================
+  // 1. ACTIVE BIN
+  // ============================================================
   try {
     const activeIdHex = await ethCall(
       pool.address,
       LBPAIR_GET_ACTIVE_ID
+    );
+
+    console.log(
+      `[RPC DEBUG] ${pool.pair} activeId response:`,
+      activeIdHex
     );
 
     activeBin = decodeUint24(activeIdHex);
@@ -515,20 +527,45 @@ async function enrichPoolFromRPC(pool: IndexedPool): Promise<Partial<IndexedPool
     if (Number.isFinite(price) && price > 0) {
       currentPrice = price;
     }
-  } catch {
-    // Keep existing activeBin/currentPrice.
+
+    console.log(
+      `[RPC DEBUG] ${pool.pair} activeBin=${activeBin} price=${currentPrice}`
+    );
+  } catch (err) {
+    console.error(
+      `[RPC DEBUG] ${pool.pair} getActiveId FAILED:`,
+      err
+    );
+
+    // IMPORTANT:
+    // Active ID failure must NOT stop reserve reading.
   }
 
-  // 2. ALWAYS try to read reserves independently.
+  // ============================================================
+  // 2. RESERVES
+  // ============================================================
   try {
+    console.log(
+      `[RPC DEBUG] ${pool.pair} calling getReserves()`
+    );
+
     const reservesHex = await ethCall(
       pool.address,
       LBPAIR_GET_RESERVES
     );
 
+    console.log(
+      `[RPC DEBUG] ${pool.pair} reserves response:`,
+      reservesHex
+    );
+
     const clean = reservesHex.startsWith('0x')
       ? reservesHex.slice(2)
       : reservesHex;
+
+    console.log(
+      `[RPC DEBUG] ${pool.pair} reserves hex length=${clean.length}`
+    );
 
     if (clean.length >= 128) {
       reserveX = BigInt(
@@ -538,10 +575,38 @@ async function enrichPoolFromRPC(pool: IndexedPool): Promise<Partial<IndexedPool
       reserveY = BigInt(
         '0x' + clean.slice(64, 128)
       ).toString();
+
+      console.log(
+        `[RPC DEBUG] ${pool.pair} reserves parsed:`,
+        {
+          reserveX,
+          reserveY,
+        }
+      );
+    } else {
+      console.error(
+        `[RPC DEBUG] ${pool.pair} INVALID RESERVES LENGTH: ${clean.length}`
+      );
     }
-  } catch {
-    // Keep existing reserves.
+  } catch (err) {
+    console.error(
+      `[RPC DEBUG] ${pool.pair} getReserves FAILED:`,
+      err
+    );
   }
+
+  // ============================================================
+  // 3. FINAL RESULT
+  // ============================================================
+  console.log(
+    `[RPC DEBUG] ${pool.pair} FINAL:`,
+    {
+      activeBin,
+      currentPrice,
+      reserveX,
+      reserveY,
+    }
+  );
 
   return {
     activeBin,
