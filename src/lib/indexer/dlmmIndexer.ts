@@ -496,7 +496,7 @@ async function getDLMMSwapFields(): Promise<Set<string>> {
     const fields = new Set(fieldRows.map(f => f.name));
     if (!fields.size) throw new Error('Subgraph introspection returned no DLMMSwap fields');
     dlmmSwapFieldsCache = fields;
-    console.log('[DLMM V16] DLMMSwap schema:', fieldRows.map(f => ({ name: f.name, type: f.type })).sort((a, b) => a.name.localeCompare(b.name)));
+    console.log('[DLMM V17] DLMMSwap schema:', fieldRows.map(f => ({ name: f.name, type: f.type })).sort((a, b) => a.name.localeCompare(b.name)));
     return fields;
   } catch (err) {
     dlmmSwapIntrospectionError = err instanceof Error ? err.message : String(err);
@@ -504,7 +504,7 @@ async function getDLMMSwapFields(): Promise<Set<string>> {
     // established as part of this project's DLMMSwap payload. Keep the
     // fallback deliberately minimal; never guess tokenIn/tokenOut/blockNumber.
     dlmmSwapFieldsCache = new Set(['id', 'pool', 'transaction', 'timestamp', 'amountUSD']);
-    console.log('[DLMM V16] DLMMSwap introspection unavailable:', dlmmSwapIntrospectionError);
+    console.log('[DLMM V17] DLMMSwap introspection unavailable:', dlmmSwapIntrospectionError);
     return dlmmSwapFieldsCache;
   }
 }
@@ -635,7 +635,7 @@ async function fetchRecentSwapsForPool(poolId: string, limit = 100): Promise<Sub
   return fetchDLMMSwaps({ poolId, chainId: CHAIN_ID, limit }, query);
 }
 
-async function fetchRecentSwapsGlobalFiltered(cutoffSeconds: number): Promise<SubgraphSwap[]> {
+async function fetchRecentSwapsGlobalFiltered(cutoffSeconds: number): Promise<{ rows: SubgraphSwap[]; complete: boolean }> {
   const all: SubgraphSwap[] = [];
   const query = `
     query GetRecentSwaps($since: String!, $chainId: Int!, $limit: Int!, $offset: Int!) {
@@ -654,10 +654,12 @@ async function fetchRecentSwapsGlobalFiltered(cutoffSeconds: number): Promise<Su
       query,
     );
     all.push(...rows);
-    if (rows.length < SWAP_PAGE_SIZE) return all.filter(s => safeTimestampSeconds(s.timestamp) >= cutoffSeconds);
+    if (rows.length < SWAP_PAGE_SIZE) {
+      return { rows: all.filter(s => safeTimestampSeconds(s.timestamp) >= cutoffSeconds), complete: true };
+    }
   }
 
-  return all.filter(s => safeTimestampSeconds(s.timestamp) >= cutoffSeconds);
+  return { rows: all.filter(s => safeTimestampSeconds(s.timestamp) >= cutoffSeconds), complete: false };
 }
 
 async function fetchRecentSwapsGlobalPaged(cutoffSeconds: number): Promise<SubgraphSwap[]> {
@@ -688,16 +690,20 @@ async function fetchRecentSwapsGlobalPaged(cutoffSeconds: number): Promise<Subgr
 interface GlobalSwapResult {
   swaps: SubgraphSwap[];
   complete: boolean;
+  pagesFetched: number;
+  hitPageLimit: boolean;
   source: 'global-filtered' | 'global-paged' | 'pool-fallback';
   error?: string;
 }
 
 async function fetchGlobalRecentSwaps(cutoffSeconds: number): Promise<GlobalSwapResult> {
   try {
-    const rows = await fetchRecentSwapsGlobalFiltered(cutoffSeconds);
+    const result = await fetchRecentSwapsGlobalFiltered(cutoffSeconds);
     return {
-      swaps: rows.filter(s => safeTimestampSeconds(s.timestamp) >= cutoffSeconds),
-      complete: rows.length < GLOBAL_SWAP_LIMIT,
+      swaps: result.rows,
+      complete: result.complete,
+      pagesFetched: Math.ceil(result.rows.length / SWAP_PAGE_SIZE),
+      hitPageLimit: !result.complete,
       source: 'global-filtered',
     };
   } catch (firstError) {
@@ -706,6 +712,8 @@ async function fetchGlobalRecentSwaps(cutoffSeconds: number): Promise<GlobalSwap
       return {
         swaps: rows,
         complete: rows.length < SWAP_PAGE_SIZE * GLOBAL_SWAP_MAX_PAGES,
+        pagesFetched: Math.ceil(rows.length / SWAP_PAGE_SIZE),
+        hitPageLimit: rows.length >= SWAP_PAGE_SIZE * GLOBAL_SWAP_MAX_PAGES,
         source: 'global-paged',
         error: firstError instanceof Error ? firstError.message : String(firstError),
       };
@@ -713,6 +721,8 @@ async function fetchGlobalRecentSwaps(cutoffSeconds: number): Promise<GlobalSwap
       return {
         swaps: [],
         complete: false,
+        pagesFetched: 0,
+        hitPageLimit: false,
         source: 'pool-fallback',
         error: secondError instanceof Error ? secondError.message : String(secondError),
       };
@@ -880,9 +890,9 @@ async function refreshPoolVolumes(): Promise<void> {
           volume1h: result.volume1h,
           volume6h: result.volume6h,
           volume24h: result.volume24h,
-          volumeUSD1h: result.valuedSwapCount > 0 ? result.volume1h : null,
-          volumeUSD6h: result.valuedSwapCount > 0 ? result.volume6h : null,
-          volumeUSD24h: result.valuedSwapCount > 0 ? result.volume24h : null,
+          volumeUSD1h: result.usdComplete ? result.volume1h : null,
+          volumeUSD6h: result.usdComplete ? result.volume6h : null,
+          volumeUSD24h: result.usdComplete ? result.volume24h : null,
           swapCount1h: result.swapCount1h,
           swapCount24h: result.swapCount24h,
           volatility: result.volatility,
@@ -927,7 +937,7 @@ async function refreshPoolVolumes(): Promise<void> {
 
     if (indexedSwapKeys.size > 25_000) indexedSwapKeys.clear();
 
-    console.log('[DLMM V16] volume refresh:', {
+    console.log('[DLMM V17] volume refresh:', {
       selected: all.length,
       success,
       failed,
@@ -935,6 +945,8 @@ async function refreshPoolVolumes(): Promise<void> {
       usdPools,
       source: global.source,
       globalComplete: global.complete,
+      pagesFetched: global.pagesFetched,
+      hitPageLimit: global.hitPageLimit,
       firstError: firstError || null,
       introspectionError: dlmmSwapIntrospectionError || null,
       schemaFields: dlmmSwapFieldsCache ? Array.from(dlmmSwapFieldsCache).sort() : [],
@@ -968,9 +980,9 @@ async function refreshPoolVolumes(): Promise<void> {
         volume1h: result.volume1h,
         volume6h: result.volume6h,
         volume24h: result.volume24h,
-        volumeUSD1h: result.valuedSwapCount > 0 ? result.volume1h : null,
-        volumeUSD6h: result.valuedSwapCount > 0 ? result.volume6h : null,
-        volumeUSD24h: result.valuedSwapCount > 0 ? result.volume24h : null,
+        volumeUSD1h: result.usdComplete ? result.volume1h : null,
+        volumeUSD6h: result.usdComplete ? result.volume6h : null,
+        volumeUSD24h: result.usdComplete ? result.volume24h : null,
         swapCount1h: result.swapCount1h,
         swapCount24h: result.swapCount24h,
         volatility: result.volatility,
@@ -989,7 +1001,7 @@ async function refreshPoolVolumes(): Promise<void> {
     }
   });
 
-  console.log('[DLMM V16] volume refresh:', {
+  console.log('[DLMM V17] volume refresh:', {
     selected: selected.length,
     success,
     failed,
