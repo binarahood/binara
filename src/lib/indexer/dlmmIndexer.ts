@@ -139,7 +139,7 @@ async function getTokenMetadata(address: string): Promise<{ symbol: string; deci
     return meta;
   }
   if (addr === USDG_ADDRESS.toLowerCase()) {
-    const meta = { symbol: 'USDG', decimals: 18 };
+    const meta = { symbol: 'USDG', decimals: 6 };
     tokenCache.set(addr, meta);
     return meta;
   }
@@ -390,9 +390,31 @@ async function enrichPoolFromRPC(pool: IndexedPool): Promise<Partial<IndexedPool
       const reservesHex = await ethCall(pool.address, LBPAIR_GET_RESERVES);
       // Returns (uint128 reserveX, uint128 reserveY) — two 32-byte slots
       const clean = reservesHex.startsWith('0x') ? reservesHex.slice(2) : reservesHex;
+
+      if (clean.length < 128) {
+        throw new Error(`Unexpected getReserves length: ${clean.length}`);
+      }
+
       reserveX = BigInt('0x' + clean.slice(0, 64)).toString();
       reserveY = BigInt('0x' + clean.slice(64, 128)).toString();
-    } catch { /* use existing */ }
+
+      console.log(`[RPC DEBUG] ${pool.pair} RAW getReserves():`, reservesHex);
+    } catch (err) {
+      console.log(
+        `[RPC DEBUG] ${pool.pair} getReserves failed:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+
+    console.log(`[RPC DEBUG] ${pool.pair} FINAL:`, {
+      activeBin,
+      binStep: pool.binStep,
+      currentPrice,
+      reserveX,
+      reserveY,
+      decimalsA: pool.decimalsA,
+      decimalsB: pool.decimalsB,
+    });
 
     return { activeBin, currentPrice, reserveX, reserveY, updatedAt: Date.now() };
   } catch {
@@ -495,8 +517,16 @@ export async function syncPools(): Promise<void> {
 
   if (subgraphAvailable && subgraphPools.length > 0) {
     await processPools(subgraphPools);
+
+    // Important for serverless deployments:
+    // each /api request can run in a fresh process, so the in-memory
+    // lastFullSyncAt guard is not reliable across requests. Enrich the
+    // pools immediately after discovery so RPC-derived activeBin/reserves
+    // are available on the first request too.
+    await enrichExistingPools();
   } else {
-    // Subgraph unavailable — try direct factory scan via RPC
+    // Subgraph unavailable — try direct factory scan via RPC.
+    // scanFactoryViaRPC already reads activeBin/reserves directly.
     await scanFactoryViaRPC();
   }
 }
