@@ -1,5 +1,5 @@
 /**
- * Ramses DLMM Indexer V6 for Robinhood Chain (Chain ID 4663)
+ * Ramses DLMM Indexer V7 for Robinhood Chain (Chain ID 4663)
  *
  * Protocol: Ramses DLMM
  * Factory:  0xdcD5F77697914E27f56FD263EF82923C8524AbAc
@@ -10,6 +10,8 @@
  *  2. Direct RPC (fallback / real-time) — active bin, current price, reserves
  *
  * This indexer is READ-ONLY. It never submits transactions.
+ *
+ * V7 fixes DLMM price normalization across ERC-20 decimals before USDG TVL valuation.
  */
 
 import { indexerStore, IndexedPool, IndexedSwap } from './store';
@@ -120,10 +122,31 @@ function decodeString(hex: string): string {
  * price(id) = (1 + binStep / 10000) ^ (id - 8388608)
  * Returns price of tokenX in tokenY units.
  */
-function priceFromBinId(binId: number, binStep: number): number {
+function rawPriceFromBinId(binId: number, binStep: number): number {
   const base = 1 + binStep / 10_000;
   const exponent = binId - 8_388_608;
-  return Math.pow(base, exponent);
+  const price = Math.pow(base, exponent);
+  return Number.isFinite(price) && price > 0 ? price : 0;
+}
+
+/**
+ * Convert the DLMM bin price (raw tokenY units per raw tokenX unit) into
+ * a human-readable tokenY-per-tokenX price. LBPair's price formula is
+ * independent of ERC-20 decimals, so decimal normalization is mandatory
+ * when pairs such as WETH/USDG are used (18 vs 6 decimals).
+ */
+function priceFromBinId(
+  binId: number,
+  binStep: number,
+  decimalsX = 18,
+  decimalsY = 18,
+): number {
+  const rawPrice = rawPriceFromBinId(binId, binStep);
+  if (!rawPrice) return 0;
+
+  const decimalScale = 10 ** (decimalsX - decimalsY);
+  const humanPrice = rawPrice * decimalScale;
+  return Number.isFinite(humanPrice) && humanPrice > 0 ? humanPrice : 0;
 }
 
 // ─── Token metadata ───────────────────────────────────────────────────────────
@@ -400,7 +423,7 @@ async function enrichPoolFromRPC(pool: IndexedPool): Promise<Partial<IndexedPool
   try {
     const activeIdHex = await ethCall(pool.address, LBPAIR_GET_ACTIVE_ID);
     const activeBin = decodeUint24(activeIdHex);
-    let currentPrice = priceFromBinId(activeBin, pool.binStep);
+    let currentPrice = priceFromBinId(activeBin, pool.binStep, pool.decimalsA, pool.decimalsB);
 
     let reserveX = pool.reserveX;
     let reserveY = pool.reserveY;
@@ -544,7 +567,7 @@ async function processPools(subgraphPools: SubgraphPool[]): Promise<void> {
             decimalsB,
             sp.reserveX || '0',
             sp.reserveY || '0',
-            sp.activeId != null ? priceFromBinId(sp.activeId, sp.binStep) : 0,
+            sp.activeId != null ? priceFromBinId(sp.activeId, sp.binStep, decimalsA, decimalsB) : 0,
           )
         : null;
       const tvlUSD = subgraphTvlUSD ?? fallbackTvlUSD;
@@ -553,7 +576,7 @@ async function processPools(subgraphPools: SubgraphPool[]): Promise<void> {
       let activeBin = sp.activeId ?? null;
       let currentPrice: number | null = null;
       if (activeBin !== null) {
-        currentPrice = priceFromBinId(activeBin, sp.binStep);
+        currentPrice = priceFromBinId(activeBin, sp.binStep, decimalsA, decimalsB);
       }
 
       const existing = indexerStore.getPool(sp.id);
@@ -713,7 +736,7 @@ async function syncRecentSwaps(): Promise<void> {
               amountIn: s.amountIn,
               amountOut: s.amountOut,
               activeBinAfter: s.activeBinId,
-              price: s.activeBinId ? priceFromBinId(s.activeBinId, pool.binStep) : null,
+              price: s.activeBinId ? priceFromBinId(s.activeBinId, pool.binStep, pool.decimalsA, pool.decimalsB) : null,
               volumeUSD: s.amountUSD ? parseFloat(s.amountUSD) : null,
             };
             indexerStore.addSwap(swap);
@@ -783,7 +806,7 @@ async function scanFactoryViaRPC(): Promise<void> {
           getTokenMetadata(tokenY),
         ]);
 
-        const currentPrice = priceFromBinId(activeBin, binStep);
+        const currentPrice = priceFromBinId(activeBin, binStep, metaX.decimals, metaY.decimals);
         const existing = indexerStore.getPool(pairAddress);
         const baseFeePercent = binStep * 0.01;
         const fallbackTvlUSD = estimateTvlFromUSDG(
