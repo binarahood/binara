@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 80" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bin-grad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#6366f1" />
+      <stop offset="100%" stop-color="#8b5cf6" />
+    </linearGradient>
+  </defs>
+
+  <!-- Icon: DLMM Liquidity Bins -->
+  <g id="icon" fill="url(#bin-grad)">
+    <path d="M 26 62 L 26 50 A 4 4 0 0 1 34 50 L 34 62 Z" />
+    <path d="M 37 62 L 37 36 A 4 4 0 0 1 45 36 L 45 62 Z" />
+    <path d="M 48 62 L 48 22 A 4 4 0 0 1 56 22 L 56 62 Z" />
+    <path d="M 59 62 L 59 36 A 4 4 0 0 1 67 36 L 67 62 Z" />
+    <path d="M 70 62 L 70 50 A 4 4 0 0 1 78 50 L 78 62 Z" />
+  </g>
+
+  <!-- Wordmark: BINARA -->
+  <g id="wordmark" transform="translate(102, 25)" fill="#e2e8f0" fill-rule="evenodd">
+    <!-- B -->
+    <path d="M 0 0 H 14 A 8.5 8.5 0 0 1 22.5 8.5 A 8.5 8.5 0 0 1 14 17 A 9.5 9.5 0 0 1 23.5 20.5 A 9.5 9.5 0 0 1 14 30 H 0 Z M 6 6 H 14 A 2.5 2.5 0 0 1 16.5 8.5 A 2.5 2.5 0 0 1 14 11 H 6 Z M 6 17 H 14 A 3.5 3.5 0 0 1 17.5 20.5 A 3.5 3.5 0 0 1 14 24 H 6 Z" />
+    
+    <!-- I -->
+    <path d="M 34 0 H 40 V 30 H 34 Z" />
+    
+    <!-- N -->
+    <path d="M 50 0 H 56 L 66 18.75 V 0 H 72 V 30 H 66 L 56 11.25 V 30 H 50 Z" />
+    
+    <!-- A -->
+    <path d="M 91 0 H 97 L 106 30 H 100 L 98.2 24 H 89.8 L 88 30 H 82 Z M 94 10 L 91.6 18 H 96.4 Z" />
+    
+    <!-- R -->
+    <path d="M 116 0 H 130 A 8.5 8.5 0 0 1 138.5 8.5 A 8.5 8.5 0 0 1 130 17 H 132 L 138 30 H 132 L 126 17 H 122 V 30 H 116 Z M 122 6 H 130 A 2.5 2.5 0 0 1 132.5 8.5 A 2.5 2.5 0 0 1 130 11 H 122 Z" />
+    
+    <!-- A -->
+    <path d="M 158 0 H 164 L 173 30 H 167 L 165.2 24 H 156.8 L 155 30 H 149 Z M 161 10 L 158.6 18 H 163.4 Z" />
+  </g>
+</svg>
