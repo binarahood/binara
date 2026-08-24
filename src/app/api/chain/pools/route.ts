@@ -7,30 +7,17 @@ import { indexerStore, IndexedPool } from '@/lib/indexer/store';
 const CHAIN_ID = 4663;
 const RPC_URL = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
 
-// Track whether the indexer has been started in this process
+// Track whether a background refresh is already running in this warm process.
 let indexerStarted = false;
 
-async function rpcCall(method: string, params: unknown[] = []) {
-  const res = await fetch(RPC_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    next: { revalidate: 0 },
-  });
-  if (!res.ok) throw new Error(`RPC HTTP error: ${res.status}`);
-  const data = await res.json();
-  if (data.error) throw new Error(`RPC error: ${data.error.message}`);
-  return data.result;
-}
-
 async function ensureIndexerRunning() {
-  if (!indexerStarted) {
-    indexerStarted = true;
-    // Run initial indexing (non-blocking)
-    runIndexer().catch(() => {
-      indexerStarted = false; // allow retry
-    });
-  }
+  if (indexerStarted) return;
+  indexerStarted = true;
+  runIndexer().catch(() => {
+    indexerStarted = false;
+  }).finally(() => {
+    indexerStarted = false;
+  });
 }
 
 /**
@@ -109,16 +96,24 @@ export async function GET() {
       );
     }
 
-    // Ensure indexer is running
-    await ensureIndexerRunning();
+    let indexerState = indexerStore.getState();
+    let rawPools = indexerStore.getAllPools();
 
-    const indexerState = indexerStore.getState();
-    const rawPools = indexerStore.getAllPools();
-
-    // If indexer just started and has no pools yet, trigger a sync
+    // On a fresh Vercel serverless instance the in-memory store is empty.
+    // Do one synchronous discovery pass so the first request can actually
+    // return real pools instead of returning an empty placeholder response.
     if (rawPools.length === 0 && indexerState.status !== 'indexing') {
-      // Non-blocking sync attempt
-      syncPools().catch(() => {});
+      try {
+        await syncPools();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Pool discovery failed';
+        indexerStore.setState({ status: 'error', error: message });
+      }
+      indexerState = indexerStore.getState();
+      rawPools = indexerStore.getAllPools();
+    } else if (rawPools.length > 0) {
+      // Keep live RPC fields fresh on warm instances without blocking the response.
+      void ensureIndexerRunning();
     }
 
     const pools = rawPools.map(formatPoolForAPI);
