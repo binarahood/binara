@@ -1,17 +1,17 @@
 /**
- * Ramses DLMM Indexer V8 for Robinhood Chain (Chain ID 4663)
+ * Ramses DLMM Indexer V9 for Robinhood Chain (Chain ID 4663)
  *
- * Protocol: Ramses DLMM
- * Factory:  0xdcD5F77697914E27f56FD263EF82923C8524AbAc
- * Subgraph: https://gateway.kingdom.dev/robinhood/subgraph/v1/graphql
- *
- * Data sources:
- *  1. Subgraph (primary) — pool list, swap history, volume, reserves
- *  2. Direct RPC (fallback / real-time) — active bin, current price, reserves
+ * Goals of V9:
+ *  - Fast first discovery from the subgraph.
+ *  - Direct RPC enrichment only for USDG pools (the pools where we can
+ *    calculate a conservative USD TVL without inventing a USD price).
+ *  - Keep live on-chain reserves/active-bin data separate from subgraph data.
+ *  - Never replace a valid subgraph TVL with N/A just because an RPC call
+ *    returns zero reserves or reverts.
+ *  - Avoid fetching 50 swaps for every pool on every API request.
+ *  - Use bounded concurrency so Vercel/RPC is not flooded.
  *
  * This indexer is READ-ONLY. It never submits transactions.
- *
- * V8 fixes USDG TVL source precedence and adds a reserve-ratio price fallback when the bin price is unavailable or invalid.
  */
 
 import { indexerStore, IndexedPool, IndexedSwap } from './store';
@@ -23,60 +23,52 @@ const FACTORY_ADDRESS = '0xdcD5F77697914E27f56FD263EF82923C8524AbAc';
 const SUBGRAPH_URL = 'https://gateway.kingdom.dev/robinhood/subgraph/v1/graphql';
 const RPC_URL = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
 
-// Known quote assets on Robinhood Chain
 const WETH_ADDRESS = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73';
 const USDG_ADDRESS = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
-const USDG_DECIMALS = 6;
 const USDG_USD_PRICE = 1;
 
-// Ramses DLMM Factory ABI fragments (minimal, for eth_call)
-const FACTORY_GET_NUMBER_OF_LB_PAIRS = '0x4e937c3a'; // getNumberOfLBPairs()
-const FACTORY_GET_LB_PAIR_AT_INDEX = '0x7daf5d66'; // getLBPairAtIndex(uint256)
+const FACTORY_GET_NUMBER_OF_LB_PAIRS = '0x4e937c3a';
+const FACTORY_GET_LB_PAIR_AT_INDEX = '0x7daf5d66';
 
-// LBPair ABI selectors (for eth_call)
-const LBPAIR_GET_ACTIVE_ID = '0xdbe65edc';       // getActiveId() returns (uint24)
-const LBPAIR_GET_RESERVES = '0x0902f1ac';         // getReserves() returns (uint128, uint128)
-const LBPAIR_GET_STATIC_FEE = '0x7ca0de30';       // getStaticFeeParameters()
-const LBPAIR_TOKEN_X = '0x05e8746d';              // getTokenX() returns (address)
-const LBPAIR_TOKEN_Y = '0xda10610c';              // getTokenY() returns (address)
-const LBPAIR_BIN_STEP = '0x17f11ecc';             // getBinStep() returns (uint16)
+const LBPAIR_GET_ACTIVE_ID = '0xdbe65edc';
+const LBPAIR_GET_RESERVES = '0x0902f1ac';
+const LBPAIR_TOKEN_X = '0x05e8746d';
+const LBPAIR_TOKEN_Y = '0xda10610c';
+const LBPAIR_BIN_STEP = '0x17f11ecc';
 
-// ERC20 ABI selectors
 const ERC20_SYMBOL = '0x95d89b41';
 const ERC20_DECIMALS = '0x313ce567';
 
-// ─── RPC helpers ─────────────────────────────────────────────────────────────
+// Tunable, but safe defaults for Vercel/serverless.
+const DISCOVERY_INTERVAL_MS = 5 * 60_000;
+const RPC_REFRESH_INTERVAL_MS = 20_000;
+const VOLUME_REFRESH_INTERVAL_MS = 60_000;
+const SWAP_REFRESH_INTERVAL_MS = 5 * 60_000;
 
-async function rpcCall(method: string, params: unknown[] = []): Promise<unknown> {
-  const res = await fetch(RPC_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    cache: 'no-store',
-  });
-  if (!res.ok) throw new Error(`RPC HTTP ${res.status}`);
-  const data = await res.json();
-  if (data.error) throw new Error(`RPC: ${data.error.message}`);
-  return data.result;
-}
+const RPC_CONCURRENCY = Math.max(1, Number(process.env.DLMM_RPC_CONCURRENCY || 10));
+const SUBGRAPH_CONCURRENCY = Math.max(1, Number(process.env.DLMM_SUBGRAPH_CONCURRENCY || 12));
+const MAX_USDG_RPC_POOLS = Math.max(1, Number(process.env.DLMM_MAX_USDG_RPC_POOLS || 100));
+const MAX_SWAPS_POOLS = Math.max(0, Number(process.env.DLMM_MAX_SWAP_POOLS || 30));
+const MAX_FACTORY_POOLS = Math.max(1, Number(process.env.DLMM_MAX_POOLS || 200));
+const FACTORY_CONCURRENCY = Math.max(1, Number(process.env.DLMM_FACTORY_CONCURRENCY || 8));
 
-async function ethCall(to: string, data: string): Promise<string> {
-  const result = await rpcCall('eth_call', [{ to, data }, 'latest']);
-  return result as string;
-}
+// ─── Process-local state ──────────────────────────────────────────────────────
 
-async function getBlockNumber(): Promise<number> {
-  const hex = await rpcCall('eth_blockNumber');
-  return parseInt(hex as string, 16);
-}
+let indexerRunning = false;
+let lastDiscoveryAt = 0;
+let lastRpcRefreshAt = 0;
+let lastVolumeRefreshAt = 0;
+let lastSwapRefreshAt = 0;
 
-/** Bounded concurrency helper: faster than serial batches without flooding RPC/subgraph. */
+// ─── Generic bounded concurrency ───────────────────────────────────────────────
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
   worker: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
   if (items.length === 0) return [];
+
   const results = new Array<R>(items.length);
   let cursor = 0;
 
@@ -84,7 +76,11 @@ async function mapWithConcurrency<T, R>(
     while (true) {
       const index = cursor++;
       if (index >= items.length) return;
-      results[index] = await worker(items[index], index);
+      try {
+        results[index] = await worker(items[index], index);
+      } catch {
+        // Individual failures must not abort the complete scan.
+      }
     }
   }
 
@@ -93,20 +89,47 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-const RPC_ENRICH_CONCURRENCY = Math.max(1, Number(process.env.DLMM_RPC_CONCURRENCY || 10));
-const SUBGRAPH_CONCURRENCY = Math.max(1, Number(process.env.DLMM_SUBGRAPH_CONCURRENCY || 10));
+// ─── RPC ───────────────────────────────────────────────────────────────────────
 
-// ─── ABI decode helpers ───────────────────────────────────────────────────────
+async function rpcCall(method: string, params: unknown[] = []): Promise<unknown> {
+  const res = await fetch(RPC_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    cache: 'no-store',
+  });
 
-function decodeUint256(hex: string): bigint {
-  const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
-  if (!clean || clean === '0'.repeat(64)) return 0n;
-  return BigInt('0x' + clean.slice(0, 64));
+  if (!res.ok) throw new Error(`RPC HTTP ${res.status}`);
+
+  const data = await res.json() as {
+    result?: unknown;
+    error?: { message?: string };
+  };
+
+  if (data.error) throw new Error(`RPC: ${data.error.message || 'Unknown error'}`);
+  return data.result;
 }
 
-function decodeAddress(hex: string): string {
-  const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
-  return '0x' + clean.slice(24, 64);
+async function ethCall(to: string, data: string): Promise<string> {
+  return String(await rpcCall('eth_call', [{ to, data }, 'latest']));
+}
+
+async function getBlockNumber(): Promise<number> {
+  const hex = String(await rpcCall('eth_blockNumber'));
+  return parseInt(hex, 16);
+}
+
+// ─── ABI decoders ──────────────────────────────────────────────────────────────
+
+function cleanHex(hex: string): string {
+  return hex.startsWith('0x') ? hex.slice(2) : hex;
+}
+
+function decodeUint256(hex: string): bigint {
+  const clean = cleanHex(hex);
+  if (!clean) return 0n;
+  const word = clean.slice(0, 64).padStart(64, '0');
+  return BigInt(`0x${word}`);
 }
 
 function decodeUint24(hex: string): number {
@@ -117,81 +140,86 @@ function decodeUint16(hex: string): number {
   return Number(decodeUint256(hex));
 }
 
+function decodeAddress(hex: string): string {
+  const clean = cleanHex(hex);
+  if (clean.length < 64) throw new Error('Invalid address ABI result');
+  return `0x${clean.slice(24, 64)}`;
+}
+
 function decodeString(hex: string): string {
   try {
-    const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
-    // ABI encoded string: offset (32 bytes) + length (32 bytes) + data
+    const clean = cleanHex(hex);
     if (clean.length < 128) {
-      // Try fixed bytes32 (some tokens use bytes32 for symbol)
-      const bytes = Buffer.from(clean.slice(0, 64), 'hex');
-      const str = bytes.toString('utf8').replace(/\0/g, '').trim();
-      return str || '???';
+      return Buffer.from(clean.slice(0, 64), 'hex').toString('utf8').replace(/\0/g, '').trim() || '???';
     }
-    const lengthHex = clean.slice(64, 128);
-    const length = parseInt(lengthHex, 16);
-    if (length === 0 || length > 100) {
-      // Try bytes32 fallback
-      const bytes = Buffer.from(clean.slice(0, 64), 'hex');
-      return bytes.toString('utf8').replace(/\0/g, '').trim() || '???';
+
+    const length = parseInt(clean.slice(64, 128), 16);
+    if (!Number.isFinite(length) || length <= 0 || length > 100) {
+      return Buffer.from(clean.slice(0, 64), 'hex').toString('utf8').replace(/\0/g, '').trim() || '???';
     }
-    const strHex = clean.slice(128, 128 + length * 2);
-    return Buffer.from(strHex, 'hex').toString('utf8').trim() || '???';
+
+    return Buffer.from(clean.slice(128, 128 + length * 2), 'hex')
+      .toString('utf8')
+      .replace(/\0/g, '')
+      .trim() || '???';
   } catch {
     return '???';
   }
 }
 
-// ─── DLMM price formula ───────────────────────────────────────────────────────
+function decodeReserves(hex: string): { reserveX: string; reserveY: string } {
+  const clean = cleanHex(hex);
+  // getReserves() returns two 32-byte ABI words in the observed RPC response.
+  if (clean.length < 128) throw new Error(`Invalid getReserves response length: ${clean.length}`);
 
-/**
- * Ramses DLMM price formula (same as Trader Joe v2.1):
- * price(id) = (1 + binStep / 10000) ^ (id - 8388608)
- * Returns price of tokenX in tokenY units.
- */
-function rawPriceFromBinId(binId: number, binStep: number): number {
-  const base = 1 + binStep / 10_000;
-  const exponent = binId - 8_388_608;
-  const price = Math.pow(base, exponent);
-  return Number.isFinite(price) && price > 0 ? price : 0;
+  return {
+    reserveX: BigInt(`0x${clean.slice(0, 64)}`).toString(),
+    reserveY: BigInt(`0x${clean.slice(64, 128)}`).toString(),
+  };
 }
 
-/**
- * Convert the DLMM bin price (raw tokenY units per raw tokenX unit) into
- * a human-readable tokenY-per-tokenX price. LBPair's price formula is
- * independent of ERC-20 decimals, so decimal normalization is mandatory
- * when pairs such as WETH/USDG are used (18 vs 6 decimals).
- */
+// ─── DLMM price ────────────────────────────────────────────────────────────────
+
+function rawPriceFromBinId(binId: number, binStep: number): number {
+  if (!Number.isFinite(binId) || !Number.isFinite(binStep) || binStep < 0) return 0;
+  const base = 1 + binStep / 10_000;
+  const exponent = binId - 8_388_608;
+  const raw = Math.pow(base, exponent);
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
 function priceFromBinId(
   binId: number,
   binStep: number,
   decimalsX = 18,
   decimalsY = 18,
 ): number {
-  const rawPrice = rawPriceFromBinId(binId, binStep);
-  if (!rawPrice) return 0;
+  const raw = rawPriceFromBinId(binId, binStep);
+  if (!raw) return 0;
 
-  const decimalScale = 10 ** (decimalsX - decimalsY);
-  const humanPrice = rawPrice * decimalScale;
-  return Number.isFinite(humanPrice) && humanPrice > 0 ? humanPrice : 0;
+  const scale = 10 ** (decimalsX - decimalsY);
+  const human = raw * scale;
+  return Number.isFinite(human) && human > 0 ? human : 0;
 }
 
-// ─── Token metadata ───────────────────────────────────────────────────────────
+// ─── Token metadata ────────────────────────────────────────────────────────────
 
 const tokenCache = new Map<string, { symbol: string; decimals: number }>();
 
 async function getTokenMetadata(address: string): Promise<{ symbol: string; decimals: number }> {
-  const addr = address.toLowerCase();
-  if (tokenCache.has(addr)) return tokenCache.get(addr)!;
+  const key = address.toLowerCase();
+  const cached = tokenCache.get(key);
+  if (cached) return cached;
 
-  // Known tokens
-  if (addr === WETH_ADDRESS.toLowerCase()) {
+  if (key === WETH_ADDRESS.toLowerCase()) {
     const meta = { symbol: 'WETH', decimals: 18 };
-    tokenCache.set(addr, meta);
+    tokenCache.set(key, meta);
     return meta;
   }
-  if (addr === USDG_ADDRESS.toLowerCase()) {
-    const meta = { symbol: 'USDG', decimals: USDG_DECIMALS };
-    tokenCache.set(addr, meta);
+
+  if (key === USDG_ADDRESS.toLowerCase()) {
+    const meta = { symbol: 'USDG', decimals: 6 };
+    tokenCache.set(key, meta);
     return meta;
   }
 
@@ -200,144 +228,23 @@ async function getTokenMetadata(address: string): Promise<{ symbol: string; deci
       ethCall(address, ERC20_SYMBOL),
       ethCall(address, ERC20_DECIMALS),
     ]);
-    const symbol = decodeString(symbolHex);
+
     const decimals = Number(decodeUint256(decimalsHex));
-    const meta = { symbol: symbol || addr.slice(0, 6), decimals: decimals || 18 };
-    tokenCache.set(addr, meta);
+    const meta = {
+      symbol: decodeString(symbolHex),
+      decimals: Number.isFinite(decimals) && decimals >= 0 && decimals <= 36 ? decimals : 18,
+    };
+
+    tokenCache.set(key, meta);
     return meta;
   } catch {
-    const meta = { symbol: addr.slice(2, 8).toUpperCase(), decimals: 18 };
-    tokenCache.set(addr, meta);
+    const meta = { symbol: key.slice(2, 8).toUpperCase(), decimals: 18 };
+    tokenCache.set(key, meta);
     return meta;
   }
 }
 
-// ─── Subgraph queries ─────────────────────────────────────────────────────────
-
-async function subgraphQuery(query: string, variables: Record<string, unknown> = {}): Promise<unknown> {
-  const res = await fetch(SUBGRAPH_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, variables }),
-    cache: 'no-store',
-  });
-  if (!res.ok) throw new Error(`Subgraph HTTP ${res.status}`);
-  const data = await res.json();
-  if (data.errors) throw new Error(`Subgraph: ${data.errors[0]?.message}`);
-  return data.data;
-}
-
-// Fetch all DLMM pools from subgraph
-async function fetchPoolsFromSubgraph(): Promise<SubgraphPool[]> {
-  const query = `
-    query GetPools($chainId: Int!, $limit: Int!, $offset: Int!) {
-      DLMMPool(
-        where: { chainId: { _eq: $chainId } }
-        limit: $limit
-        offset: $offset
-        order_by: { createdAtTimestamp: asc }
-      ) {
-        id
-        tokenX { id symbol decimals }
-        tokenY { id symbol decimals }
-        binStep
-        activeId
-        reserveX
-        reserveY
-        totalValueLockedUSD
-        volumeUSD
-        feesUSD
-        txCount
-        createdAtBlockNumber
-        createdAtTimestamp
-        isAlive
-      }
-    }
-  `;
-
-  const allPools: SubgraphPool[] = [];
-  let offset = 0;
-  const limit = 100;
-
-  while (true) {
-    const data = await subgraphQuery(query, { chainId: CHAIN_ID, limit, offset }) as { DLMMPool?: SubgraphPool[] };
-    const pools = data?.DLMMPool ?? [];
-    allPools.push(...pools);
-    if (pools.length < limit) break;
-    offset += limit;
-  }
-
-  return allPools;
-}
-
-// Fetch recent swaps from subgraph
-async function fetchRecentSwapsFromSubgraph(poolId: string, limit = 100): Promise<SubgraphSwap[]> {
-  const query = `
-    query GetSwaps($poolId: String!, $chainId: Int!, $limit: Int!) {
-      DLMMSwap(
-        where: { pool: { _eq: $poolId }, chainId: { _eq: $chainId } }
-        limit: $limit
-        order_by: { timestamp: desc }
-      ) {
-        id
-        pool
-        transaction
-        timestamp
-        blockNumber
-        tokenIn
-        tokenOut
-        amountIn
-        amountOut
-        amountUSD
-        activeBinId
-      }
-    }
-  `;
-
-  try {
-    const data = await subgraphQuery(query, { poolId: poolId.toLowerCase(), chainId: CHAIN_ID, limit }) as { DLMMSwap?: SubgraphSwap[] };
-    return data?.DLMMSwap ?? [];
-  } catch {
-    return [];
-  }
-}
-
-// Fetch volume data per pool
-async function fetchPoolVolumeFromSubgraph(poolId: string): Promise<SubgraphPoolVolume | null> {
-  const now = Math.floor(Date.now() / 1000);
-  const h1 = now - 3600;
-  const h6 = now - 21600;
-  const h24 = now - 86400;
-
-  const query = `
-    query GetPoolVolume($poolId: String!, $chainId: Int!, $h1: Int!, $h6: Int!, $h24: Int!) {
-      vol1h: DLMMSwap_aggregate(
-        where: { pool: { _eq: $poolId }, chainId: { _eq: $chainId }, timestamp: { _gte: $h1 } }
-      ) { aggregate { sum { amountUSD } count } }
-      vol6h: DLMMSwap_aggregate(
-        where: { pool: { _eq: $poolId }, chainId: { _eq: $chainId }, timestamp: { _gte: $h6 } }
-      ) { aggregate { sum { amountUSD } count } }
-      vol24h: DLMMSwap_aggregate(
-        where: { pool: { _eq: $poolId }, chainId: { _eq: $chainId }, timestamp: { _gte: $h24 } }
-      ) { aggregate { sum { amountUSD } count } }
-    }
-  `;
-
-  try {
-    const data = await subgraphQuery(query, {
-      poolId: poolId.toLowerCase(),
-      chainId: CHAIN_ID,
-      h1,
-      h6,
-      h24,
-    }) as SubgraphPoolVolume;
-    return data;
-  } catch {
-    return null;
-  }
-}
-
-// ─── Subgraph types ───────────────────────────────────────────────────────────
+// ─── Subgraph ──────────────────────────────────────────────────────────────────
 
 interface SubgraphToken {
   id: string;
@@ -382,37 +289,158 @@ interface SubgraphPoolVolume {
   vol24h?: { aggregate?: { sum?: { amountUSD?: string | null }; count?: number } };
 }
 
-// ─── Lightweight USD valuation fallback ────────────────────────────────────────
-/**
- * Estimate TVL when the subgraph does not provide totalValueLockedUSD.
- *
- * This is intentionally conservative: only pools containing USDG are valued,
- * because USDG is the one quote asset we can treat as approximately $1 here.
- * For all other pairs we return null rather than inventing a USD price.
- */
+async function subgraphQuery(
+  query: string,
+  variables: Record<string, unknown> = {},
+): Promise<unknown> {
+  const res = await fetch(SUBGRAPH_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, variables }),
+    cache: 'no-store',
+  });
+
+  if (!res.ok) throw new Error(`Subgraph HTTP ${res.status}`);
+
+  const data = await res.json() as {
+    data?: unknown;
+    errors?: Array<{ message?: string }>;
+  };
+
+  if (data.errors?.length) {
+    throw new Error(`Subgraph: ${data.errors[0]?.message || 'Unknown error'}`);
+  }
+
+  return data.data;
+}
+
+async function fetchPoolsFromSubgraph(): Promise<SubgraphPool[]> {
+  const query = `
+    query GetPools($chainId: Int!, $limit: Int!, $offset: Int!) {
+      DLMMPool(
+        where: { chainId: { _eq: $chainId } }
+        limit: $limit
+        offset: $offset
+        order_by: { createdAtTimestamp: asc }
+      ) {
+        id
+        tokenX { id symbol decimals }
+        tokenY { id symbol decimals }
+        binStep
+        activeId
+        reserveX
+        reserveY
+        totalValueLockedUSD
+        volumeUSD
+        feesUSD
+        txCount
+        createdAtBlockNumber
+        createdAtTimestamp
+        isAlive
+      }
+    }
+  `;
+
+  const allPools: SubgraphPool[] = [];
+  const limit = 100;
+  let offset = 0;
+
+  while (true) {
+    const data = await subgraphQuery(query, {
+      chainId: CHAIN_ID,
+      limit,
+      offset,
+    }) as { DLMMPool?: SubgraphPool[] };
+
+    const pools = data.DLMMPool ?? [];
+    allPools.push(...pools);
+    if (pools.length < limit) break;
+    offset += limit;
+  }
+
+  return allPools;
+}
+
+async function fetchPoolVolumeFromSubgraph(poolId: string): Promise<SubgraphPoolVolume | null> {
+  const now = Math.floor(Date.now() / 1000);
+  const query = `
+    query GetPoolVolume($poolId: String!, $chainId: Int!, $h1: Int!, $h6: Int!, $h24: Int!) {
+      vol1h: DLMMSwap_aggregate(
+        where: { pool: { _eq: $poolId }, chainId: { _eq: $chainId }, timestamp: { _gte: $h1 } }
+      ) { aggregate { sum { amountUSD } count } }
+      vol6h: DLMMSwap_aggregate(
+        where: { pool: { _eq: $poolId }, chainId: { _eq: $chainId }, timestamp: { _gte: $h6 } }
+      ) { aggregate { sum { amountUSD } count } }
+      vol24h: DLMMSwap_aggregate(
+        where: { pool: { _eq: $poolId }, chainId: { _eq: $chainId }, timestamp: { _gte: $h24 } }
+      ) { aggregate { sum { amountUSD } count } }
+    }
+  `;
+
+  try {
+    return await subgraphQuery(query, {
+      poolId: poolId.toLowerCase(),
+      chainId: CHAIN_ID,
+      h1: now - 3600,
+      h6: now - 21600,
+      h24: now - 86400,
+    }) as SubgraphPoolVolume;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchRecentSwapsFromSubgraph(poolId: string, limit = 50): Promise<SubgraphSwap[]> {
+  const query = `
+    query GetSwaps($poolId: String!, $chainId: Int!, $limit: Int!) {
+      DLMMSwap(
+        where: { pool: { _eq: $poolId }, chainId: { _eq: $chainId } }
+        limit: $limit
+        order_by: { timestamp: desc }
+      ) {
+        id
+        pool
+        transaction
+        timestamp
+        blockNumber
+        tokenIn
+        tokenOut
+        amountIn
+        amountOut
+        amountUSD
+        activeBinId
+      }
+    }
+  `;
+
+  try {
+    const data = await subgraphQuery(query, {
+      poolId: poolId.toLowerCase(),
+      chainId: CHAIN_ID,
+      limit,
+    }) as { DLMMSwap?: SubgraphSwap[] };
+    return data.DLMMSwap ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// ─── TVL / USDG valuation ──────────────────────────────────────────────────────
+
 function isUSDGToken(address: string): boolean {
   return address.toLowerCase() === USDG_ADDRESS.toLowerCase();
 }
 
 function humanReserve(raw: string, decimals: number): number {
   try {
-    const value = BigInt(raw || '0');
-    const n = Number(value);
-    const result = n / 10 ** decimals;
-    return Number.isFinite(result) && result >= 0 ? result : 0;
+    const n = Number(BigInt(raw || '0'));
+    const value = n / 10 ** decimals;
+    return Number.isFinite(value) && value >= 0 ? value : 0;
   } catch {
     return 0;
   }
 }
 
-/**
- * If the bin price is missing, use the pool's own reserve ratio as a last-resort
- * price estimate for USDG pairs. This is not used for non-USDG pools.
- *
- * For X/USDG: priceXInY = reserveY / reserveX.
- * For USDG/Y: priceXInY = reserveX / reserveY (because priceXInY means
- * USDG-per-Y, while reserveX is USDG and reserveY is Y).
- */
 function priceFromUSDGReserveRatio(
   tokenX: string,
   tokenY: string,
@@ -439,13 +467,6 @@ interface TvlEstimate {
   source: 'bin' | 'reserve-ratio' | 'stable-side-only' | 'none';
 }
 
-/**
- * Estimate USD TVL for USDG pools from live reserves.
- *
- * IMPORTANT: For USDG pairs we intentionally prefer this on-chain estimate
- * over subgraph totalValueLockedUSD. The subgraph value can lag or be stale,
- * while the reserves are read directly from the LBPair contract.
- */
 function estimateTvlFromUSDG(
   tokenX: string,
   tokenY: string,
@@ -455,108 +476,67 @@ function estimateTvlFromUSDG(
   reserveY: string,
   binPriceXInY: number,
 ): TvlEstimate {
-  try {
-    const x = humanReserve(reserveX, decimalsX);
-    const y = humanReserve(reserveY, decimalsY);
-    if (x <= 0 && y <= 0) {
-      return { tvl: null, priceXInY: 0, source: 'none' };
-    }
+  const x = humanReserve(reserveX, decimalsX);
+  const y = humanReserve(reserveY, decimalsY);
 
-    const isXUSDG = isUSDGToken(tokenX);
-    const isYUSDG = isUSDGToken(tokenY);
-    if (!isXUSDG && !isYUSDG) {
-      return { tvl: null, priceXInY: 0, source: 'none' };
-    }
+  const isXUSDG = isUSDGToken(tokenX);
+  const isYUSDG = isUSDGToken(tokenY);
+  if (!isXUSDG && !isYUSDG) return { tvl: null, priceXInY: 0, source: 'none' };
+  if (x <= 0 && y <= 0) return { tvl: null, priceXInY: 0, source: 'none' };
 
-    let priceXInY = Number.isFinite(binPriceXInY) && binPriceXInY > 0
-      ? binPriceXInY
-      : 0;
-    let source: TvlEstimate['source'] = priceXInY > 0 ? 'bin' : 'none';
+  let priceXInY = Number.isFinite(binPriceXInY) && binPriceXInY > 0 ? binPriceXInY : 0;
+  let source: TvlEstimate['source'] = priceXInY > 0 ? 'bin' : 'none';
 
-    // A reserve-ratio fallback guarantees USDG pools can still show a TVL
-    // when the active-bin read is unavailable or produces an unusable value.
-    if (priceXInY <= 0) {
-      priceXInY = priceFromUSDGReserveRatio(
-        tokenX, tokenY, decimalsX, decimalsY, reserveX, reserveY,
-      );
-      if (priceXInY > 0) source = 'reserve-ratio';
-    }
-
-    if (isYUSDG && !isXUSDG) {
-      if (priceXInY > 0) {
-        const value = x * priceXInY + y;
-        if (Number.isFinite(value) && value > 0) {
-          return { tvl: value, priceXInY, source };
-        }
-      }
-      return y > 0
-        ? { tvl: y * USDG_USD_PRICE, priceXInY: 0, source: 'stable-side-only' }
-        : { tvl: null, priceXInY: 0, source: 'none' };
-    }
-
-    if (isXUSDG && !isYUSDG) {
-      if (priceXInY > 0) {
-        const tokenYPriceUSD = 1 / priceXInY;
-        const value = x + y * tokenYPriceUSD;
-        if (Number.isFinite(value) && value > 0) {
-          return { tvl: value, priceXInY, source };
-        }
-      }
-      return x > 0
-        ? { tvl: x * USDG_USD_PRICE, priceXInY: 0, source: 'stable-side-only' }
-        : { tvl: null, priceXInY: 0, source: 'none' };
-    }
-
-    return { tvl: null, priceXInY: 0, source: 'none' };
-  } catch {
-    return { tvl: null, priceXInY: 0, source: 'none' };
+  if (priceXInY <= 0) {
+    priceXInY = priceFromUSDGReserveRatio(
+      tokenX,
+      tokenY,
+      decimalsX,
+      decimalsY,
+      reserveX,
+      reserveY,
+    );
+    if (priceXInY > 0) source = 'reserve-ratio';
   }
+
+  if (isYUSDG && !isXUSDG) {
+    if (priceXInY > 0) {
+      const value = x * priceXInY + y * USDG_USD_PRICE;
+      if (Number.isFinite(value) && value > 0) return { tvl: value, priceXInY, source };
+    }
+    return y > 0
+      ? { tvl: y * USDG_USD_PRICE, priceXInY: 0, source: 'stable-side-only' }
+      : { tvl: null, priceXInY: 0, source: 'none' };
+  }
+
+  if (isXUSDG && !isYUSDG) {
+    if (priceXInY > 0) {
+      const tokenYPriceUSD = 1 / priceXInY;
+      const value = x * USDG_USD_PRICE + y * tokenYPriceUSD;
+      if (Number.isFinite(value) && value > 0) return { tvl: value, priceXInY, source };
+    }
+    return x > 0
+      ? { tvl: x * USDG_USD_PRICE, priceXInY: 0, source: 'stable-side-only' }
+      : { tvl: null, priceXInY: 0, source: 'none' };
+  }
+
+  return { tvl: null, priceXInY: 0, source: 'none' };
 }
 
-// ─── Pool enrichment via RPC ──────────────────────────────────────────────────
-
-async function enrichPoolFromRPC(pool: IndexedPool): Promise<Partial<IndexedPool>> {
-  try {
-    const activeIdHex = await ethCall(pool.address, LBPAIR_GET_ACTIVE_ID);
-    const activeBin = decodeUint24(activeIdHex);
-    let currentPrice = priceFromBinId(activeBin, pool.binStep, pool.decimalsA, pool.decimalsB);
-
-    let reserveX = pool.reserveX;
-    let reserveY = pool.reserveY;
-
-    try {
-      const reservesHex = await ethCall(pool.address, LBPAIR_GET_RESERVES);
-      // Returns (uint128 reserveX, uint128 reserveY) — two 32-byte slots
-      const clean = reservesHex.startsWith('0x') ? reservesHex.slice(2) : reservesHex;
-      reserveX = BigInt('0x' + clean.slice(0, 64)).toString();
-      reserveY = BigInt('0x' + clean.slice(64, 128)).toString();
-    } catch { /* use existing */ }
-
-    return { activeBin, currentPrice, reserveX, reserveY, updatedAt: Date.now() };
-  } catch {
-    return {};
-  }
-}
-
-// ─── Analytics scoring ────────────────────────────────────────────────────────
+// ─── Analytics ────────────────────────────────────────────────────────────────
 
 function computeAnalytics(pool: IndexedPool): Partial<IndexedPool> {
-  const vol24h = pool.volumeUSD24h ?? pool.volume24h;
+  const vol24h = pool.volumeUSD24h ?? pool.volume24h ?? 0;
   const tvl = pool.tvl ?? 0;
   const volumeToTVL = tvl > 0 ? vol24h / tvl : 0;
 
-  // Estimate APR from fees: fee% * volume24h * 365 / tvl
   const estimatedAPR = tvl > 0 && vol24h > 0
     ? (pool.fee / 100) * vol24h * 365 / tvl * 100
     : null;
 
-  // Risk level based on volatility and bin step
-  let riskLevel: IndexedPool['riskLevel'] = 'LOW';
-  if (pool.binStep >= 20) riskLevel = 'HIGH';
-  else if (pool.binStep >= 10) riskLevel = 'MEDIUM';
-  else if (pool.binStep >= 5) riskLevel = 'LOW';
+  const riskLevel: IndexedPool['riskLevel'] =
+    pool.binStep >= 20 ? 'HIGH' : pool.binStep >= 10 ? 'MEDIUM' : 'LOW';
 
-  // Analytics score (0-100)
   let score = 50;
   if (volumeToTVL > 5) score += 20;
   else if (volumeToTVL > 2) score += 10;
@@ -565,282 +545,258 @@ function computeAnalytics(pool: IndexedPool): Partial<IndexedPool> {
   if (pool.swapCount24h > 100) score += 10;
   else if (pool.swapCount24h > 10) score += 5;
   if (pool.status === 'active') score += 5;
-  score = Math.min(100, Math.max(0, score));
 
   return {
     volumeToTVL,
     estimatedAPR,
     riskLevel,
-    analyticsScore: score,
+    analyticsScore: Math.min(100, Math.max(0, score)),
   };
 }
 
-// ─── Main indexer ─────────────────────────────────────────────────────────────
+// ─── Pool construction ────────────────────────────────────────────────────────
 
-let indexerRunning = false;
-let lastFullSyncAt = 0;
-const FULL_SYNC_INTERVAL_MS = 60_000; // Re-sync pools every 60s
-
-export async function runIndexer(): Promise<void> {
-  if (indexerRunning) return;
-  indexerRunning = true;
-
-  indexerStore.setState({
-    status: 'indexing',
-    startedAt: Date.now(),
-    error: null,
-  });
-
-  try {
-    await syncPools();
-    await syncRecentSwaps();
-
-    const blockNumber = await getBlockNumber();
-    indexerStore.setState({
-      status: 'live',
-      lastIndexedBlock: blockNumber,
-      lastIndexedTimestamp: Date.now(),
-      error: null,
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Indexer error';
-    indexerStore.setState({ status: 'error', error: msg });
-  } finally {
-    indexerRunning = false;
-  }
+function parsePositiveNumber(value: string | null): number | null {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-export async function syncPools(): Promise<void> {
-  const now = Date.now();
-  if (now - lastFullSyncAt < FULL_SYNC_INTERVAL_MS && indexerStore.getAllPools().length > 0) {
-    // Only do RPC enrichment for existing pools
-    await enrichExistingPools();
-    return;
-  }
-  lastFullSyncAt = now;
+function buildPoolFromSubgraph(sp: SubgraphPool): IndexedPool {
+  const existing = indexerStore.getPool(sp.id);
+  const decimalsA = Number.isFinite(sp.tokenX.decimals) ? sp.tokenX.decimals : 18;
+  const decimalsB = Number.isFinite(sp.tokenY.decimals) ? sp.tokenY.decimals : 18;
+  const activeBin = sp.activeId ?? null;
+  const currentPrice = activeBin == null
+    ? null
+    : priceFromBinId(activeBin, sp.binStep, decimalsA, decimalsB) || null;
 
-  // Try subgraph first
-  let subgraphPools: SubgraphPool[] = [];
-  let subgraphAvailable = false;
+  const subgraphTvl = parsePositiveNumber(sp.totalValueLockedUSD);
+  const volume24h = parsePositiveNumber(sp.volumeUSD);
+  const hasUSDG = isUSDGToken(sp.tokenX.id) || isUSDGToken(sp.tokenY.id);
 
-  try {
-    subgraphPools = await fetchPoolsFromSubgraph();
-    subgraphAvailable = true;
-  } catch {
-    // Subgraph unavailable — fall back to factory RPC scan
-    subgraphAvailable = false;
+  const initialTvl = hasUSDG
+    ? (subgraphTvl ?? null)
+    : subgraphTvl;
+
+  const pool: IndexedPool = {
+    address: sp.id,
+    protocol: 'Ramses DLMM',
+    pid: 0,
+    tokenA: sp.tokenX.id,
+    tokenB: sp.tokenY.id,
+    symbolA: sp.tokenX.symbol || '???',
+    symbolB: sp.tokenY.symbol || '???',
+    decimalsA,
+    decimalsB,
+    pair: `${sp.tokenX.symbol || '???'}/${sp.tokenY.symbol || '???'}`,
+    binStep: sp.binStep,
+    activeBin,
+    currentPrice,
+    fee: sp.binStep * 0.01,
+    reserveX: sp.reserveX || '0',
+    reserveY: sp.reserveY || '0',
+    tvl: initialTvl,
+    volume1m: existing?.volume1m ?? 0,
+    volume5m: existing?.volume5m ?? 0,
+    volume15m: existing?.volume15m ?? 0,
+    volume1h: existing?.volume1h ?? 0,
+    volume6h: existing?.volume6h ?? 0,
+    volume24h: existing?.volume24h ?? 0,
+    volumeUSD1h: existing?.volumeUSD1h ?? null,
+    volumeUSD6h: existing?.volumeUSD6h ?? null,
+    volumeUSD24h: volume24h ?? existing?.volumeUSD24h ?? null,
+    volumeToTVL: 0,
+    volatility: sp.binStep * 0.5,
+    analyticsScore: 50,
+    riskLevel: 'LOW',
+    estimatedAPR: null,
+    priceChange24h: existing?.priceChange24h ?? null,
+    timeInRange: existing?.timeInRange ?? null,
+    swapCount24h: sp.txCount || existing?.swapCount24h || 0,
+    swapCount1h: existing?.swapCount1h ?? 0,
+    status: sp.isAlive ? 'active' : 'inactive',
+    createdBlock: sp.createdAtBlockNumber || existing?.createdBlock || 0,
+    createdTimestamp: sp.createdAtTimestamp || existing?.createdTimestamp || 0,
+    updatedAt: Date.now(),
+  };
+
+  if (existing?.currentPrice && currentPrice) {
+    pool.priceChange24h = ((currentPrice - existing.currentPrice) / existing.currentPrice) * 100;
   }
 
-  if (subgraphAvailable && subgraphPools.length > 0) {
-    await processPools(subgraphPools);
-  } else {
-    // Subgraph unavailable — try direct factory scan via RPC
-    await scanFactoryViaRPC();
-  }
+  Object.assign(pool, computeAnalytics(pool));
+  return pool;
 }
 
 async function processPools(subgraphPools: SubgraphPool[]): Promise<void> {
   for (const sp of subgraphPools) {
     try {
-      const symbolA = sp.tokenX.symbol || '???';
-      const symbolB = sp.tokenY.symbol || '???';
-      const decimalsA = sp.tokenX.decimals || 18;
-      const decimalsB = sp.tokenY.decimals || 18;
-
-      // Base fee from bin step (Ramses DLMM: base fee ≈ binStep * 0.01%)
-      // Actual fee is dynamic but we use the static base as a floor
-      const baseFeePercent = sp.binStep * 0.01; // e.g. binStep=5 → 0.05%
-
-      const parsedSubgraphTvl = sp.totalValueLockedUSD ? parseFloat(sp.totalValueLockedUSD) : NaN;
-      const subgraphTvlUSD = Number.isFinite(parsedSubgraphTvl) && parsedSubgraphTvl > 0 ? parsedSubgraphTvl : null;
-      const vol24hUSD = sp.volumeUSD ? parseFloat(sp.volumeUSD) : null;
-
-      // Active bin and price
-      let activeBin = sp.activeId ?? null;
-      let currentPrice: number | null = null;
-      if (activeBin !== null) {
-        currentPrice = priceFromBinId(activeBin, sp.binStep, decimalsA, decimalsB);
-      }
-
-      const tvlEstimate = estimateTvlFromUSDG(
-        sp.tokenX.id,
-        sp.tokenY.id,
-        decimalsA,
-        decimalsB,
-        sp.reserveX || '0',
-        sp.reserveY || '0',
-        currentPrice ?? 0,
-      );
-
-      const hasUSDG = isUSDGToken(sp.tokenX.id) || isUSDGToken(sp.tokenY.id);
-      // For USDG pools, trust live reserve-based valuation first. For other
-      // pools, retain the subgraph's USD TVL when it is available.
-      const tvlUSD = hasUSDG
-        ? tvlEstimate.tvl
-        : subgraphTvlUSD;
-
-      // If the bin price is unavailable, expose the reserve-ratio estimate so
-      // USDG pools do not remain N/A while their reserves are non-zero.
-      if ((!currentPrice || !Number.isFinite(currentPrice)) && tvlEstimate.priceXInY > 0) {
-        currentPrice = tvlEstimate.priceXInY;
-      }
-
-      const existing = indexerStore.getPool(sp.id);
-
-      const pool: IndexedPool = {
-        address: sp.id,
-        protocol: 'Ramses DLMM',
-        pid: 0,
-        tokenA: sp.tokenX.id,
-        tokenB: sp.tokenY.id,
-        symbolA,
-        symbolB,
-        decimalsA,
-        decimalsB,
-        pair: `${symbolA}/${symbolB}`,
-        binStep: sp.binStep,
-        activeBin,
-        currentPrice,
-        fee: baseFeePercent,
-        reserveX: sp.reserveX || '0',
-        reserveY: sp.reserveY || '0',
-        tvl: tvlUSD,
-        volume1m: 0,
-        volume5m: 0,
-        volume15m: 0,
-        volume1h: 0,
-        volume6h: 0,
-        volume24h: 0,
-        volumeUSD1h: null,
-        volumeUSD6h: null,
-        volumeUSD24h: vol24hUSD,
-        volumeToTVL: tvlUSD && vol24hUSD ? vol24hUSD / tvlUSD : 0,
-        volatility: sp.binStep * 0.5, // rough proxy
-        analyticsScore: 50,
-        riskLevel: 'LOW',
-        estimatedAPR: null,
-        priceChange24h: null,
-        timeInRange: null,
-        swapCount24h: sp.txCount || 0,
-        swapCount1h: 0,
-        status: sp.isAlive ? 'active' : 'inactive',
-        createdBlock: sp.createdAtBlockNumber || 0,
-        createdTimestamp: sp.createdAtTimestamp || 0,
-        updatedAt: Date.now(),
-      };
-
-      // Preserve price change from previous data
-      if (existing?.currentPrice && currentPrice) {
-        pool.priceChange24h = ((currentPrice - existing.currentPrice) / existing.currentPrice) * 100;
-      }
-
-      // Apply analytics
-      const analytics = computeAnalytics(pool);
-      Object.assign(pool, analytics);
-
-      indexerStore.upsertPool(pool);
+      indexerStore.upsertPool(buildPoolFromSubgraph(sp));
     } catch {
-      // Skip individual pool errors
+      // Ignore one malformed pool.
     }
   }
 
-  // Enrich with volume data from subgraph
-  await enrichVolumeFromSubgraph();
+  indexerStore.setState({
+    poolsDiscovered: indexerStore.getAllPools().length,
+    error: null,
+  });
 }
+
+// ─── RPC enrichment ───────────────────────────────────────────────────────────
+
+interface RpcPoolData {
+  activeBin: number;
+  currentPrice: number;
+  reserveX: string;
+  reserveY: string;
+}
+
+async function enrichPoolFromRPC(pool: IndexedPool): Promise<RpcPoolData | null> {
+  try {
+    // These two calls are independent and can be done in parallel.
+    const [activeIdHex, reservesHex] = await Promise.all([
+      ethCall(pool.address, LBPAIR_GET_ACTIVE_ID),
+      ethCall(pool.address, LBPAIR_GET_RESERVES),
+    ]);
+
+    const activeBin = decodeUint24(activeIdHex);
+    const { reserveX, reserveY } = decodeReserves(reservesHex);
+    const currentPrice = priceFromBinId(
+      activeBin,
+      pool.binStep,
+      pool.decimalsA,
+      pool.decimalsB,
+    );
+
+    return {
+      activeBin,
+      currentPrice,
+      reserveX,
+      reserveY,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function enrichUSDGPools(): Promise<void> {
+  const candidates = indexerStore
+    .getAllPools()
+    .filter((pool) =>
+      pool.status === 'active' &&
+      (isUSDGToken(pool.tokenA) || isUSDGToken(pool.tokenB))
+    )
+    .slice(0, MAX_USDG_RPC_POOLS);
+
+  await mapWithConcurrency(candidates, RPC_CONCURRENCY, async (pool) => {
+    const rpcData = await enrichPoolFromRPC(pool);
+    if (!rpcData) return;
+
+    const updated: IndexedPool = {
+      ...pool,
+      activeBin: rpcData.activeBin,
+      currentPrice: rpcData.currentPrice || pool.currentPrice,
+      reserveX: rpcData.reserveX,
+      reserveY: rpcData.reserveY,
+      updatedAt: Date.now(),
+    };
+
+    // IMPORTANT: zero live reserves do NOT erase a valid subgraph TVL.
+    // This protects pools where the contract call is valid but the pair has
+    // no current liquidity, and it also avoids turning a good TVL into N/A.
+    const hasLiveReserves = rpcData.reserveX !== '0' || rpcData.reserveY !== '0';
+    if (hasLiveReserves) {
+      const estimate = estimateTvlFromUSDG(
+        updated.tokenA,
+        updated.tokenB,
+        updated.decimalsA,
+        updated.decimalsB,
+        updated.reserveX,
+        updated.reserveY,
+        updated.currentPrice ?? 0,
+      );
+
+      if (estimate.tvl != null) {
+        updated.tvl = estimate.tvl;
+      }
+
+      if ((!updated.currentPrice || !Number.isFinite(updated.currentPrice)) && estimate.priceXInY > 0) {
+        updated.currentPrice = estimate.priceXInY;
+      }
+    }
+
+    Object.assign(updated, computeAnalytics(updated));
+    indexerStore.upsertPool(updated);
+  });
+}
+
+// ─── Volume enrichment ─────────────────────────────────────────────────────────
 
 async function enrichVolumeFromSubgraph(): Promise<void> {
   const pools = indexerStore.getAllPools();
 
   await mapWithConcurrency(pools, SUBGRAPH_CONCURRENCY, async (pool) => {
-    try {
-      const volData = await fetchPoolVolumeFromSubgraph(pool.address);
-      if (!volData) return;
+    const volData = await fetchPoolVolumeFromSubgraph(pool.address);
+    if (!volData) return;
 
-      const vol1h = parseFloat(volData.vol1h?.aggregate?.sum?.amountUSD ?? '0') || 0;
-      const vol6h = parseFloat(volData.vol6h?.aggregate?.sum?.amountUSD ?? '0') || 0;
-      const vol24h = parseFloat(volData.vol24h?.aggregate?.sum?.amountUSD ?? '0') || 0;
-      const swapCount1h = volData.vol1h?.aggregate?.count ?? 0;
-      const swapCount24h = volData.vol24h?.aggregate?.count ?? pool.swapCount24h;
+    const vol1h = parsePositiveNumber(volData.vol1h?.aggregate?.sum?.amountUSD ?? null) ?? 0;
+    const vol6h = parsePositiveNumber(volData.vol6h?.aggregate?.sum?.amountUSD ?? null) ?? 0;
+    const vol24h = parsePositiveNumber(volData.vol24h?.aggregate?.sum?.amountUSD ?? null) ?? 0;
 
-      const updated: IndexedPool = {
-        ...pool,
-        volumeUSD1h: vol1h || null,
-        volumeUSD6h: vol6h || null,
-        volumeUSD24h: vol24h || null,
-        swapCount1h,
-        swapCount24h,
-        updatedAt: Date.now(),
-      };
+    const updated: IndexedPool = {
+      ...pool,
+      volumeUSD1h: vol1h > 0 ? vol1h : null,
+      volumeUSD6h: vol6h > 0 ? vol6h : null,
+      volumeUSD24h: vol24h > 0 ? vol24h : null,
+      swapCount1h: volData.vol1h?.aggregate?.count ?? 0,
+      swapCount24h: volData.vol24h?.aggregate?.count ?? pool.swapCount24h,
+      updatedAt: Date.now(),
+    };
 
-      Object.assign(updated, computeAnalytics(updated));
-      indexerStore.upsertPool(updated);
-    } catch { /* skip individual pool */ }
+    Object.assign(updated, computeAnalytics(updated));
+    indexerStore.upsertPool(updated);
   });
 }
 
-async function enrichExistingPools(): Promise<void> {
-  const pools = indexerStore.getAllPools();
-
-  await mapWithConcurrency(pools, RPC_ENRICH_CONCURRENCY, async (pool) => {
-    try {
-      const rpcData = await enrichPoolFromRPC(pool);
-      const updated: IndexedPool = { ...pool, ...rpcData };
-
-      // Recalculate USDG TVL from the latest on-chain reserves/price.
-      // Preserve existing/subgraph TVL when the pool has no live reserves.
-      if (updated.reserveX && updated.reserveY) {
-        const tvlEstimate = estimateTvlFromUSDG(
-          updated.tokenA,
-          updated.tokenB,
-          updated.decimalsA,
-          updated.decimalsB,
-          updated.reserveX,
-          updated.reserveY,
-          updated.currentPrice ?? 0,
-        );
-        if (tvlEstimate.tvl != null) updated.tvl = tvlEstimate.tvl;
-        if ((!updated.currentPrice || !Number.isFinite(updated.currentPrice)) && tvlEstimate.priceXInY > 0) {
-          updated.currentPrice = tvlEstimate.priceXInY;
-        }
-      }
-
-      Object.assign(updated, computeAnalytics(updated));
-      indexerStore.upsertPool(updated);
-    } catch { /* skip individual pool */ }
-  });
-}
+// ─── Optional swap history ─────────────────────────────────────────────────────
 
 async function syncRecentSwaps(): Promise<void> {
-  const pools = indexerStore.getAllPools();
+  if (MAX_SWAPS_POOLS <= 0) return;
+
+  const pools = indexerStore
+    .getAllPools()
+    .filter((p) => p.status === 'active')
+    .sort((a, b) => (b.volumeUSD24h ?? 0) - (a.volumeUSD24h ?? 0))
+    .slice(0, MAX_SWAPS_POOLS);
 
   await mapWithConcurrency(pools, SUBGRAPH_CONCURRENCY, async (pool) => {
-    try {
-      const swaps = await fetchRecentSwapsFromSubgraph(pool.address, 50);
-      for (const s of swaps) {
-        const swap: IndexedSwap = {
-          poolAddress: pool.address,
-          txHash: s.transaction,
-          blockNumber: s.blockNumber,
-          timestamp: s.timestamp,
-          tokenIn: s.tokenIn,
-          tokenOut: s.tokenOut,
-          amountIn: s.amountIn,
-          amountOut: s.amountOut,
-          activeBinAfter: s.activeBinId,
-          price: s.activeBinId
-            ? priceFromBinId(s.activeBinId, pool.binStep, pool.decimalsA, pool.decimalsB)
-            : null,
-          volumeUSD: s.amountUSD ? parseFloat(s.amountUSD) : null,
-        };
-        indexerStore.addSwap(swap);
-      }
-    } catch { /* skip individual pool */ }
+    const swaps = await fetchRecentSwapsFromSubgraph(pool.address, 50);
+
+    for (const s of swaps) {
+      const swap: IndexedSwap = {
+        poolAddress: pool.address,
+        txHash: s.transaction,
+        blockNumber: s.blockNumber,
+        timestamp: s.timestamp,
+        tokenIn: s.tokenIn,
+        tokenOut: s.tokenOut,
+        amountIn: s.amountIn,
+        amountOut: s.amountOut,
+        activeBinAfter: s.activeBinId,
+        price: s.activeBinId
+          ? priceFromBinId(s.activeBinId, pool.binStep, pool.decimalsA, pool.decimalsB) || null
+          : null,
+        volumeUSD: s.amountUSD ? Number(s.amountUSD) : null,
+      };
+      indexerStore.addSwap(swap);
+    }
   });
 }
 
-// Fallback: discover every LBPair directly from the Ramses DLMM factory.
-// The factory exposes an indexed array through getNumberOfLBPairs() and
-// getLBPairAtIndex(uint256), so this does not depend on a subgraph.
+// ─── Factory fallback ──────────────────────────────────────────────────────────
+
 async function scanFactoryViaRPC(): Promise<void> {
   const countHex = await ethCall(FACTORY_ADDRESS, FACTORY_GET_NUMBER_OF_LB_PAIRS);
   const count = Number(decodeUint256(countHex));
@@ -853,25 +809,21 @@ async function scanFactoryViaRPC(): Promise<void> {
     return;
   }
 
-  // Keep RPC load reasonable on a serverless deployment.
-  const maxPairs = Math.min(count, Number(process.env.DLMM_MAX_POOLS || 200));
-  const concurrency = Math.max(1, Number(process.env.DLMM_FACTORY_CONCURRENCY || 10));
+  const maxPairs = Math.min(count, MAX_FACTORY_POOLS);
 
-  for (let start = 0; start < maxPairs; start += concurrency) {
-    const indices = Array.from(
-      { length: Math.min(concurrency, maxPairs - start) },
-      (_, offset) => start + offset
-    );
-
-    await Promise.allSettled(indices.map(async (index) => {
+  await mapWithConcurrency(
+    Array.from({ length: maxPairs }, (_, index) => index),
+    FACTORY_CONCURRENCY,
+    async (index) => {
       try {
         const pairHex = await ethCall(
           FACTORY_ADDRESS,
-          FACTORY_GET_LB_PAIR_AT_INDEX + BigInt(index).toString(16).padStart(64, '0')
+          `${FACTORY_GET_LB_PAIR_AT_INDEX}${BigInt(index).toString(16).padStart(64, '0')}`,
         );
         const pairAddress = decodeAddress(pairHex);
-        if (/^0x0+$/.test(pairAddress) || pairAddress.length !== 42) return;
+        if (/^0x0+$/.test(pairAddress)) return;
 
+        // Discovery fallback is intentionally limited to metadata + active bin + reserves.
         const [tokenXHex, tokenYHex, binStepHex, activeIdHex, reservesHex] = await Promise.all([
           ethCall(pairAddress, LBPAIR_TOKEN_X),
           ethCall(pairAddress, LBPAIR_TOKEN_Y),
@@ -884,23 +836,14 @@ async function scanFactoryViaRPC(): Promise<void> {
         const tokenY = decodeAddress(tokenYHex);
         const binStep = decodeUint16(binStepHex);
         const activeBin = decodeUint24(activeIdHex);
-        const cleanReserves = reservesHex.startsWith('0x') ? reservesHex.slice(2) : reservesHex;
-        const reserveX = cleanReserves.length >= 128
-          ? BigInt('0x' + cleanReserves.slice(0, 64)).toString()
-          : '0';
-        const reserveY = cleanReserves.length >= 128
-          ? BigInt('0x' + cleanReserves.slice(64, 128)).toString()
-          : '0';
-
+        const { reserveX, reserveY } = decodeReserves(reservesHex);
         const [metaX, metaY] = await Promise.all([
           getTokenMetadata(tokenX),
           getTokenMetadata(tokenY),
         ]);
 
         const currentPrice = priceFromBinId(activeBin, binStep, metaX.decimals, metaY.decimals);
-        const existing = indexerStore.getPool(pairAddress);
-        const baseFeePercent = binStep * 0.01;
-        const tvlEstimate = estimateTvlFromUSDG(
+        const estimate = estimateTvlFromUSDG(
           tokenX,
           tokenY,
           metaX.decimals,
@@ -909,7 +852,7 @@ async function scanFactoryViaRPC(): Promise<void> {
           reserveY,
           currentPrice,
         );
-        const effectivePrice = currentPrice || tvlEstimate.priceXInY || null;
+        const existing = indexerStore.getPool(pairAddress);
 
         const pool: IndexedPool = {
           address: pairAddress,
@@ -924,13 +867,11 @@ async function scanFactoryViaRPC(): Promise<void> {
           pair: `${metaX.symbol}/${metaY.symbol}`,
           binStep,
           activeBin,
-          currentPrice: effectivePrice,
-          fee: baseFeePercent,
+          currentPrice: currentPrice || existing?.currentPrice || null,
+          fee: binStep * 0.01,
           reserveX,
           reserveY,
-          // Factory/RPC discovery has no subgraph TVL in this path, so use the
-          // live USDG reserve valuation when possible.
-          tvl: tvlEstimate.tvl ?? existing?.tvl ?? null,
+          tvl: estimate.tvl ?? existing?.tvl ?? null,
           volume1m: existing?.volume1m ?? 0,
           volume5m: existing?.volume5m ?? 0,
           volume15m: existing?.volume15m ?? 0,
@@ -940,9 +881,9 @@ async function scanFactoryViaRPC(): Promise<void> {
           volumeUSD1h: existing?.volumeUSD1h ?? null,
           volumeUSD6h: existing?.volumeUSD6h ?? null,
           volumeUSD24h: existing?.volumeUSD24h ?? null,
-          volumeToTVL: existing?.volumeToTVL ?? 0,
+          volumeToTVL: 0,
           volatility: binStep * 0.5,
-          analyticsScore: 55,
+          analyticsScore: 50,
           riskLevel: binStep >= 20 ? 'HIGH' : binStep >= 10 ? 'MEDIUM' : 'LOW',
           estimatedAPR: existing?.estimatedAPR ?? null,
           priceChange24h: existing?.currentPrice && currentPrice
@@ -960,65 +901,119 @@ async function scanFactoryViaRPC(): Promise<void> {
         Object.assign(pool, computeAnalytics(pool));
         indexerStore.upsertPool(pool);
       } catch {
-        // A malformed/stale pair should not prevent discovery of the remaining pools.
+        // Skip malformed/stale factory entry.
       }
-    }));
-  }
+    },
+  );
 
   indexerStore.setState({
     poolsDiscovered: indexerStore.getAllPools().length,
     error: null,
   });
-
-  // Pool discovery can fall back to RPC while the subgraph may still be able
-  // to answer swap/volume queries. Try that independently so volume does not
-  // stay N/A just because DLMMPool discovery failed.
-  await enrichVolumeFromSubgraph();
 }
 
-// ─── Incremental update (called on each new block) ────────────────────────────
+// ─── Main indexer ──────────────────────────────────────────────────────────────
+
+export async function runIndexer(): Promise<void> {
+  if (indexerRunning) return;
+  indexerRunning = true;
+
+  indexerStore.setState({
+    status: 'indexing',
+    startedAt: Date.now(),
+    error: null,
+  });
+
+  try {
+    const now = Date.now();
+    const hasPools = indexerStore.getAllPools().length > 0;
+
+    // 1) Discovery is relatively expensive, so do it only periodically in a warm process.
+    // A fresh Vercel instance will still discover immediately because hasPools is false.
+    if (!hasPools || now - lastDiscoveryAt >= DISCOVERY_INTERVAL_MS) {
+      try {
+        const pools = await fetchPoolsFromSubgraph();
+        if (pools.length > 0) {
+          await processPools(pools);
+          lastDiscoveryAt = now;
+        } else if (!hasPools) {
+          await scanFactoryViaRPC();
+          lastDiscoveryAt = now;
+        }
+      } catch {
+        if (!hasPools) {
+          await scanFactoryViaRPC();
+          lastDiscoveryAt = now;
+        }
+      }
+    }
+
+    // 2) Live TVL/price refresh only touches USDG pools.
+    if (now - lastRpcRefreshAt >= RPC_REFRESH_INTERVAL_MS) {
+      await enrichUSDGPools();
+      lastRpcRefreshAt = Date.now();
+    }
+
+    // 3) Volume is slower and does not need to run on every request.
+    if (now - lastVolumeRefreshAt >= VOLUME_REFRESH_INTERVAL_MS) {
+      await enrichVolumeFromSubgraph();
+      lastVolumeRefreshAt = Date.now();
+    }
+
+    // 4) Swap history is optional and deliberately sampled, not fetched for every pool.
+    if (now - lastSwapRefreshAt >= SWAP_REFRESH_INTERVAL_MS) {
+      await syncRecentSwaps();
+      lastSwapRefreshAt = Date.now();
+    }
+
+    const blockNumber = await getBlockNumber();
+    indexerStore.setState({
+      status: 'live',
+      lastIndexedBlock: blockNumber,
+      lastIndexedTimestamp: Date.now(),
+      poolsDiscovered: indexerStore.getAllPools().length,
+      error: null,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Indexer error';
+    indexerStore.setState({
+      status: indexerStore.getAllPools().length > 0 ? 'live' : 'error',
+      error: message,
+    });
+  } finally {
+    indexerRunning = false;
+  }
+}
+
+export async function syncPools(): Promise<void> {
+  const pools = await fetchPoolsFromSubgraph();
+  if (pools.length > 0) {
+    await processPools(pools);
+    await enrichUSDGPools();
+  } else {
+    await scanFactoryViaRPC();
+  }
+}
 
 export async function onNewBlock(blockNumber: number): Promise<{
   updatedPools: string[];
   newSwaps: IndexedSwap[];
 }> {
-  const updatedPools: string[] = [];
-  const newSwaps: IndexedSwap[] = [];
+  const before = new Set(indexerStore.getAllPools().map((p) => p.address.toLowerCase()));
+  await enrichUSDGPools();
 
-  try {
-    // Enrich active pools with latest RPC data
-    const pools = indexerStore.getAllPools().filter((p) => p.status === 'active');
-    const batchSize = 5;
+  const updatedPools = indexerStore
+    .getAllPools()
+    .filter((p) => before.has(p.address.toLowerCase()))
+    .map((p) => p.address);
 
-    for (let i = 0; i < pools.length; i += batchSize) {
-      const batch = pools.slice(i, i + batchSize);
-      const results = await Promise.allSettled(
-        batch.map(async (pool) => {
-          const rpcData = await enrichPoolFromRPC(pool);
-          if (Object.keys(rpcData).length > 0) {
-            const updated = { ...pool, ...rpcData };
-            const analytics = computeAnalytics(updated);
-            indexerStore.upsertPool({ ...updated, ...analytics });
-            updatedPools.push(pool.address);
-          }
-        })
-      );
-      results; // consumed
-    }
+  indexerStore.setState({
+    lastIndexedBlock: blockNumber,
+    lastIndexedTimestamp: Date.now(),
+    status: 'live',
+  });
 
-    indexerStore.setState({
-      lastIndexedBlock: blockNumber,
-      lastIndexedTimestamp: Date.now(),
-      status: 'live',
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Block processing error';
-    indexerStore.setState({ error: msg });
-  }
-
-  return { updatedPools, newSwaps };
+  return { updatedPools, newSwaps: [] };
 }
 
-// ─── Exports ──────────────────────────────────────────────────────────────────
-
-export { FACTORY_ADDRESS, SUBGRAPH_URL, CHAIN_ID, priceFromBinId };
+export { FACTORY_ADDRESS, SUBGRAPH_URL, CHAIN_ID, priceFromBinId, estimateTvlFromUSDG };
