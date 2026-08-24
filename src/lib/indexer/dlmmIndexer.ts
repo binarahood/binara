@@ -1,5 +1,5 @@
 /**
- * Ramses DLMM Indexer V14 — Robinhood Chain (4663)
+ * Ramses DLMM Indexer V15 — Robinhood Chain (4663)
  *
  * Design goals:
  *  - Fast warm requests: discovery, RPC enrichment and volume refresh are cached.
@@ -51,8 +51,8 @@ const FACTORY_CONCURRENCY = Math.max(1, Number(process.env.DLMM_FACTORY_CONCURRE
 const SWAP_PAGE_SIZE = Math.min(1000, Math.max(100, Number(process.env.DLMM_SWAP_PAGE_SIZE || 1000)));
 const SWAP_MAX_PAGES = Math.min(12, Math.max(1, Number(process.env.DLMM_SWAP_MAX_PAGES || 8)));
 const SWAP_REFRESH_POOLS = Math.max(1, Number(process.env.DLMM_SWAP_REFRESH_POOLS || 12));
-const GLOBAL_SWAP_LIMIT = Math.min(12000, Math.max(1000, Number(process.env.DLMM_GLOBAL_SWAP_LIMIT || 12000)));
-const GLOBAL_SWAP_MAX_PAGES = Math.min(12, Math.max(1, Number(process.env.DLMM_GLOBAL_SWAP_MAX_PAGES || 12)));
+const GLOBAL_SWAP_LIMIT = Math.min(2000, Math.max(100, Number(process.env.DLMM_GLOBAL_SWAP_LIMIT || 1000)));
+const GLOBAL_SWAP_MAX_PAGES = Math.min(20, Math.max(1, Number(process.env.DLMM_GLOBAL_SWAP_MAX_PAGES || 12)));
 const VOLUME_FALLBACK_POOL_LIMIT = Math.min(25, Math.max(3, Number(process.env.DLMM_VOLUME_FALLBACK_POOLS || 12)));
 
 let indexerRunning = false;
@@ -177,9 +177,20 @@ interface SubgraphPool {
   feesUSD: string | null; txCount: number; createdAtBlockNumber: number; createdAtTimestamp: number; isAlive: boolean;
 }
 interface SubgraphSwap {
-  id: string; pool: string; transaction: string; timestamp: number; blockNumber?: number | null;
-  tokenIn: string; tokenOut: string; amountIn: string; amountOut: string; amountUSD: string | null; activeBinId: number;
+  id: string;
+  pool: string;
+  transaction?: string | null;
+  timestamp: number;
+  blockNumber?: number | null;
+  tokenIn?: string | null;
+  tokenOut?: string | null;
+  amountIn?: string | null;
+  amountOut?: string | null;
+  amountUSD?: string | null;
+  activeBinId?: number | null;
+  [key: string]: unknown;
 }
+
 
 async function subgraphQuery(query: string, variables: Record<string, unknown> = {}): Promise<any> {
   const res = await fetch(SUBGRAPH_URL, {
@@ -357,7 +368,7 @@ function swapPrice(s: SubgraphSwap, pool: IndexedPool): number | null {
   const amountOut = Number(s.amountOut);
   if (!(amountIn > 0) || !(amountOut > 0)) return null;
 
-  const inToken = s.tokenIn.toLowerCase();
+  const inToken = String(s.tokenIn || '').toLowerCase();
   if (inToken === pool.tokenA.toLowerCase()) {
     const x = amountIn / 10 ** pool.decimalsA;
     const y = amountOut / 10 ** pool.decimalsB;
@@ -454,6 +465,98 @@ function computeAnalytics(pool: IndexedPool): Partial<IndexedPool> {
   };
 }
 
+
+// The Robinhood/Kingdom DLMMSwap schema is not identical to older DLMM
+// subgraphs. V15 introspects the live schema once and builds the selection
+// dynamically, so a missing optional field can never invalidate the query.
+let dlmmSwapFieldsCache: Set<string> | null = null;
+let dlmmSwapIntrospectionError = '';
+
+async function getDLMMSwapFields(): Promise<Set<string>> {
+  if (dlmmSwapFieldsCache) return dlmmSwapFieldsCache;
+  const query = `
+    query IntrospectDLMMSwap {
+      __type(name: "DLMMSwap") {
+        fields { name }
+      }
+    }
+  `;
+  try {
+    const data = await subgraphQuery(query) as { __type?: { fields?: Array<{ name: string }> } | null };
+    const fields = new Set((data.__type?.fields ?? []).map(f => f.name));
+    if (!fields.size) throw new Error('Subgraph introspection returned no DLMMSwap fields');
+    dlmmSwapFieldsCache = fields;
+    console.log('[DLMM V15] DLMMSwap schema:', Array.from(fields).sort());
+    return fields;
+  } catch (err) {
+    dlmmSwapIntrospectionError = err instanceof Error ? err.message : String(err);
+    // These are the only fields that earlier production responses have
+    // established as part of this project's DLMMSwap payload. Keep the
+    // fallback deliberately minimal; never guess tokenIn/tokenOut/blockNumber.
+    dlmmSwapFieldsCache = new Set(['id', 'pool', 'transaction', 'timestamp', 'amountUSD']);
+    console.log('[DLMM V15] DLMMSwap introspection unavailable:', dlmmSwapIntrospectionError);
+    return dlmmSwapFieldsCache;
+  }
+}
+
+function chooseField(fields: Set<string>, candidates: string[]): string | null {
+  for (const candidate of candidates) if (fields.has(candidate)) return candidate;
+  return null;
+}
+
+function buildDLMMSwapSelection(fields: Set<string>): { selection: string; map: Record<string, string> } {
+  const candidates: Record<string, string[]> = {
+    id: ['id'],
+    pool: ['pool'],
+    transaction: ['transaction', 'txHash', 'transactionHash'],
+    timestamp: ['timestamp', 'createdAtTimestamp'],
+    amountUSD: ['amountUSD'],
+    activeBinId: ['activeBinId', 'activeId'],
+    tokenIn: ['tokenIn', 'inputToken', 'tokenInAddress'],
+    tokenOut: ['tokenOut', 'outputToken', 'tokenOutAddress'],
+    amountIn: ['amountIn', 'inputAmount'],
+    amountOut: ['amountOut', 'outputAmount'],
+    blockNumber: ['blockNumber', 'createdAtBlockNumber'],
+  };
+  const map: Record<string, string> = {};
+  const selected: string[] = [];
+  for (const [logical, names] of Object.entries(candidates)) {
+    const actual = chooseField(fields, names);
+    if (actual) { map[logical] = actual; selected.push(actual); }
+  }
+  // id/pool/timestamp are required by the local aggregator. If the live
+  // schema lacks one of them, fail explicitly rather than silently fabricating.
+  for (const required of ['id', 'pool', 'timestamp']) {
+    if (!map[required]) throw new Error(`DLMMSwap required field missing: ${required}`);
+  }
+  return { selection: Array.from(new Set(selected)).join(' '), map };
+}
+
+function normalizeSwapRow(row: Record<string, unknown>, map: Record<string, string>): SubgraphSwap {
+  const get = (logical: string) => map[logical] ? row[map[logical]] : undefined;
+  return {
+    id: String(get('id') ?? ''),
+    pool: String(get('pool') ?? ''),
+    transaction: get('transaction') == null ? null : String(get('transaction')),
+    timestamp: Number(get('timestamp') ?? 0),
+    blockNumber: get('blockNumber') == null ? 0 : Number(get('blockNumber')),
+    tokenIn: get('tokenIn') == null ? null : String(get('tokenIn')),
+    tokenOut: get('tokenOut') == null ? null : String(get('tokenOut')),
+    amountIn: get('amountIn') == null ? null : String(get('amountIn')),
+    amountOut: get('amountOut') == null ? null : String(get('amountOut')),
+    amountUSD: get('amountUSD') == null ? null : String(get('amountUSD')),
+    activeBinId: get('activeBinId') == null ? null : Number(get('activeBinId')),
+  };
+}
+
+async function fetchDLMMSwaps(queryArgs: Record<string, unknown>, queryBody: string): Promise<SubgraphSwap[]> {
+  const fields = await getDLMMSwapFields();
+  const built = buildDLMMSwapSelection(fields);
+  const query = queryBody.replace('__DLMM_SWAP_SELECTION__', built.selection);
+  const data = await subgraphQuery(query, queryArgs) as { DLMMSwap?: Array<Record<string, unknown>> };
+  return (data.DLMMSwap ?? []).map(row => normalizeSwapRow(row, built.map));
+}
+
 async function fetchRecentSwapsForPool(poolId: string, limit = 100): Promise<SubgraphSwap[]> {
   const query = `
     query GetSwaps($poolId: String!, $chainId: Int!, $limit: Int!) {
@@ -461,50 +564,27 @@ async function fetchRecentSwapsForPool(poolId: string, limit = 100): Promise<Sub
         where: { pool: { _eq: $poolId }, chainId: { _eq: $chainId } }
         limit: $limit
         order_by: { timestamp: desc }
-      ) {
-        id pool transaction timestamp tokenIn tokenOut amountIn amountOut amountUSD activeBinId
-      }
+      ) { __DLMM_SWAP_SELECTION__ }
     }
   `;
-
-  const data = await subgraphQuery(query, {
-    poolId,
-    chainId: CHAIN_ID,
-    limit,
-  }) as { DLMMSwap?: SubgraphSwap[] };
-
-  return data?.DLMMSwap ?? [];
+  return fetchDLMMSwaps({ poolId, chainId: CHAIN_ID, limit }, query);
 }
 
 async function fetchRecentSwapsGlobalFiltered(cutoffSeconds: number): Promise<SubgraphSwap[]> {
-  // First choice: let the indexer do the 24h filtering. This is the cheapest
-  // and most accurate path when the timestamp filter is supported.
   const query = `
     query GetRecentSwaps($since: Int!, $chainId: Int!, $limit: Int!) {
       DLMMSwap(
         where: { chainId: { _eq: $chainId }, timestamp: { _gte: $since } }
         limit: $limit
         order_by: { timestamp: desc }
-      ) {
-        id pool transaction timestamp tokenIn tokenOut amountIn amountOut amountUSD activeBinId
-      }
+      ) { __DLMM_SWAP_SELECTION__ }
     }
   `;
-
-  const data = await subgraphQuery(query, {
-    since: cutoffSeconds,
-    chainId: CHAIN_ID,
-    limit: GLOBAL_SWAP_LIMIT,
-  }) as { DLMMSwap?: SubgraphSwap[] };
-
-  return data?.DLMMSwap ?? [];
+  return fetchDLMMSwaps({ since: cutoffSeconds, chainId: CHAIN_ID, limit: GLOBAL_SWAP_LIMIT }, query);
 }
 
 async function fetchRecentSwapsGlobalPaged(cutoffSeconds: number): Promise<SubgraphSwap[]> {
   const all: SubgraphSwap[] = [];
-
-  // Fallback query intentionally has no timestamp predicate. That keeps it
-  // compatible with subgraphs that expose timestamp as a non-Int scalar.
   const query = `
     query GetRecentSwaps($chainId: Int!, $limit: Int!, $offset: Int!) {
       DLMMSwap(
@@ -512,32 +592,19 @@ async function fetchRecentSwapsGlobalPaged(cutoffSeconds: number): Promise<Subgr
         limit: $limit
         offset: $offset
         order_by: { timestamp: desc }
-      ) {
-        id pool transaction timestamp tokenIn tokenOut amountIn amountOut amountUSD activeBinId
-      }
+      ) { __DLMM_SWAP_SELECTION__ }
     }
   `;
-
   for (let page = 0; page < GLOBAL_SWAP_MAX_PAGES; page++) {
-    const data = await subgraphQuery(query, {
-      chainId: CHAIN_ID,
-      limit: SWAP_PAGE_SIZE,
-      offset: page * SWAP_PAGE_SIZE,
-    }) as { DLMMSwap?: SubgraphSwap[] };
-
-    const rows = data?.DLMMSwap ?? [];
+    const rows = await fetchDLMMSwaps({ chainId: CHAIN_ID, limit: SWAP_PAGE_SIZE, offset: page * SWAP_PAGE_SIZE }, query);
     all.push(...rows);
-
     if (rows.length < SWAP_PAGE_SIZE) break;
-
     const oldest = rows.reduce((min, s) => {
       const ts = safeTimestampSeconds(s.timestamp);
       return ts > 0 ? Math.min(min, ts) : min;
     }, Number.MAX_SAFE_INTEGER);
-
     if (oldest <= cutoffSeconds) break;
   }
-
   return all.filter(s => safeTimestampSeconds(s.timestamp) >= cutoffSeconds);
 }
 
@@ -761,13 +828,13 @@ async function refreshPoolVolumes(): Promise<void> {
           indexedSwapKeys.add(swapKey);
           indexerStore.addSwap({
             poolAddress: pool.address,
-            txHash: s.transaction,
+            txHash: s.transaction || s.id,
             blockNumber: Number(s.blockNumber ?? 0),
             timestamp: ts,
-            tokenIn: s.tokenIn,
-            tokenOut: s.tokenOut,
-            amountIn: s.amountIn,
-            amountOut: s.amountOut,
+            tokenIn: s.tokenIn || '',
+            tokenOut: s.tokenOut || '',
+            amountIn: s.amountIn || '0',
+            amountOut: s.amountOut || '0',
             activeBinAfter: Number(s.activeBinId),
             price: swapPrice(s, updated),
             volumeUSD: calculateSwapUSD(s, updated),
@@ -783,7 +850,7 @@ async function refreshPoolVolumes(): Promise<void> {
 
     if (indexedSwapKeys.size > 25_000) indexedSwapKeys.clear();
 
-    console.log('[DLMM V14] volume refresh:', {
+    console.log('[DLMM V15] volume refresh:', {
       selected: all.length,
       success,
       failed,
@@ -792,6 +859,8 @@ async function refreshPoolVolumes(): Promise<void> {
       source: global.source,
       globalComplete: global.complete,
       firstError: firstError || null,
+      introspectionError: dlmmSwapIntrospectionError || null,
+      schemaFields: dlmmSwapFieldsCache ? Array.from(dlmmSwapFieldsCache).sort() : [],
     });
     return;
   }
@@ -843,7 +912,7 @@ async function refreshPoolVolumes(): Promise<void> {
     }
   });
 
-  console.log('[DLMM V14] volume refresh:', {
+  console.log('[DLMM V15] volume refresh:', {
     selected: selected.length,
     success,
     failed,
@@ -853,6 +922,8 @@ async function refreshPoolVolumes(): Promise<void> {
     source: 'pool-fallback',
     globalComplete: false,
     firstError: firstError || null,
+    introspectionError: dlmmSwapIntrospectionError || null,
+    schemaFields: dlmmSwapFieldsCache ? Array.from(dlmmSwapFieldsCache).sort() : [],
   });
 }
 
