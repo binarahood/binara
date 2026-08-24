@@ -21,7 +21,7 @@ export const metadata: Metadata = {
     type: 'website',
   },
   icons: {
-    icon: [{ url: '/favicon.ico', type: 'image/x-icon' }],
+    icon: [{ url: '/assets/binara-wordmark.svg', type: 'image/svg+xml' }],
   },
 };
 

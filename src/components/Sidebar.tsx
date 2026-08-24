@@ -7,6 +7,11 @@ import AppLogo from '@/components/ui/AppLogo';
 import Icon from '@/components/ui/AppIcon';
 import { useChainStatus } from '@/hooks/useChainData';
 
+// Project launch links — update these when BINARA launches.
+const PROJECT_X_URL = '';
+const CONTRACT_ADDRESS = '';
+
+
 interface NavItem {
   label: string;
   href: string;
@@ -33,7 +38,6 @@ const navGroups: NavGroup[] = [
     items: [
       { label: 'Pools', href: '/pool-detail', icon: 'CircleStackIcon' },
       { label: 'Positions', href: '/positions', icon: 'ChartBarIcon' },
-      { label: 'Strategies', href: '/strategies', icon: 'AdjustmentsHorizontalIcon', isDemo: true },
     ],
   },
   {
@@ -41,7 +45,6 @@ const navGroups: NavGroup[] = [
     items: [
       { label: 'Analytics', href: '/analytics', icon: 'PresentationChartLineIcon' },
       { label: 'Scanner', href: '/scanner', icon: 'SignalIcon' },
-      { label: 'Alerts', href: '/alerts', icon: 'BellIcon', badge: 2, isDemo: true },
     ],
   },
   {
@@ -91,16 +94,13 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
       `}
     >
       {/* Logo */}
-      <div className={`flex items-center h-16 border-b border-border px-3 ${collapsed ? 'justify-center' : 'gap-3'}`}>
-        <div className="flex-shrink-0">
-          <AppLogo size={32} src="/assets/binara-wordmark.svg" />
-        </div>
-        {!collapsed && (
-          <div className="flex flex-col min-w-0">
-            <span className="font-bold text-sm text-foreground tracking-tight">BINARA</span>
-            <span className="text-xs text-muted-foreground">Liquidity Intelligence</span>
-          </div>
-        )}
+      <div className={`flex items-center h-20 border-b border-border px-3 ${collapsed ? 'justify-center' : 'justify-center'}`}>
+        <AppLogo
+          width={collapsed ? 40 : 150}
+          height={collapsed ? 40 : 40}
+          src="/assets/binara-wordmark.svg"
+          className="flex-shrink-0"
+        />
       </div>
 
       {/* Network status */}
@@ -184,6 +184,41 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           </div>
         ))}
       </nav>
+
+      {/* Project links */}
+      {!collapsed && (
+        <div className="border-t border-border p-3 space-y-2">
+          <p className="px-1 text-[10px] font-semibold tracking-widest uppercase text-muted-foreground/50">
+            Project
+          </p>
+
+          <a
+            href={PROJECT_X_URL || undefined}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-disabled={!PROJECT_X_URL}
+            className={`flex items-center gap-2 px-2 py-2 rounded-lg text-xs transition-colors ${
+              PROJECT_X_URL
+                ? 'text-muted-foreground hover:text-foreground hover:bg-muted/60'
+                : 'text-muted-foreground/40 cursor-default pointer-events-none'
+            }`}
+          >
+            <span className="w-5 text-center text-sm font-semibold">𝕏</span>
+            <span className="flex-1 font-medium">X / Twitter</span>
+            <span className="text-[10px]">{PROJECT_X_URL ? '↗' : 'Soon'}</span>
+          </a>
+
+          <div className="flex items-center gap-2 px-2 py-2 rounded-lg bg-muted/30 border border-border/60">
+            <Icon name="DocumentDuplicateIcon" size={15} className="text-muted-foreground/70" />
+            <div className="min-w-0 flex-1">
+              <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wide">Contract</p>
+              <p className="text-[11px] font-mono text-muted-foreground truncate">
+                {CONTRACT_ADDRESS || 'Not launched'}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Bottom: collapse toggle */}
       <div className="border-t border-border p-2">

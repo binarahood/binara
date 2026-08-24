@@ -8,6 +8,8 @@ interface AppLogoProps {
   src?: string;
   iconName?: string;
   size?: number;
+  width?: number;
+  height?: number;
   className?: string;
   onClick?: () => void;
 }
@@ -16,6 +18,8 @@ const AppLogo = memo(function AppLogo({
   src = '/assets/binara-wordmark.svg',
   iconName = 'SparklesIcon',
   size = 64,
+  width,
+  height,
   className = '',
   onClick,
 }: AppLogoProps) {
@@ -32,8 +36,8 @@ const AppLogo = memo(function AppLogo({
         <AppImage
           src={src}
           alt="BINARA — DLMM Liquidity Intelligence"
-          width={size}
-          height={size}
+          width={width ?? size}
+          height={height ?? size}
           className="flex-shrink-0"
           priority={true}
           unoptimized={src.endsWith('.svg')}
