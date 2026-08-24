@@ -490,26 +490,66 @@ function estimateTvlFromUSDG(
 // ─── Pool enrichment via RPC ──────────────────────────────────────────────────
 
 async function enrichPoolFromRPC(pool: IndexedPool): Promise<Partial<IndexedPool>> {
+  let activeBin = pool.activeBin ?? null;
+  let currentPrice = pool.currentPrice ?? null;
+  let reserveX = pool.reserveX;
+  let reserveY = pool.reserveY;
+
+  // 1. Try active bin independently.
+  // If this fails, we still continue to read reserves.
   try {
-    const activeIdHex = await ethCall(pool.address, LBPAIR_GET_ACTIVE_ID);
-    const activeBin = decodeUint24(activeIdHex);
-    let currentPrice = priceFromBinId(activeBin, pool.binStep, pool.decimalsA, pool.decimalsB);
+    const activeIdHex = await ethCall(
+      pool.address,
+      LBPAIR_GET_ACTIVE_ID
+    );
 
-    let reserveX = pool.reserveX;
-    let reserveY = pool.reserveY;
+    activeBin = decodeUint24(activeIdHex);
 
-    try {
-      const reservesHex = await ethCall(pool.address, LBPAIR_GET_RESERVES);
-      // Returns (uint128 reserveX, uint128 reserveY) — two 32-byte slots
-      const clean = reservesHex.startsWith('0x') ? reservesHex.slice(2) : reservesHex;
-      reserveX = BigInt('0x' + clean.slice(0, 64)).toString();
-      reserveY = BigInt('0x' + clean.slice(64, 128)).toString();
-    } catch { /* use existing */ }
+    const price = priceFromBinId(
+      activeBin,
+      pool.binStep,
+      pool.decimalsA,
+      pool.decimalsB
+    );
 
-    return { activeBin, currentPrice, reserveX, reserveY, updatedAt: Date.now() };
+    if (Number.isFinite(price) && price > 0) {
+      currentPrice = price;
+    }
   } catch {
-    return {};
+    // Keep existing activeBin/currentPrice.
   }
+
+  // 2. ALWAYS try to read reserves independently.
+  try {
+    const reservesHex = await ethCall(
+      pool.address,
+      LBPAIR_GET_RESERVES
+    );
+
+    const clean = reservesHex.startsWith('0x')
+      ? reservesHex.slice(2)
+      : reservesHex;
+
+    if (clean.length >= 128) {
+      reserveX = BigInt(
+        '0x' + clean.slice(0, 64)
+      ).toString();
+
+      reserveY = BigInt(
+        '0x' + clean.slice(64, 128)
+      ).toString();
+    }
+  } catch {
+    // Keep existing reserves.
+  }
+
+  return {
+    activeBin,
+    currentPrice,
+    reserveX,
+    reserveY,
+    updatedAt: Date.now(),
+  };
 }
 
 // ─── Analytics scoring ────────────────────────────────────────────────────────
@@ -770,26 +810,48 @@ async function enrichExistingPools(): Promise<void> {
       batch.map(async (pool) => {
         try {
           const rpcData = await enrichPoolFromRPC(pool);
-          const updated: IndexedPool = { ...pool, ...rpcData };
 
-          // Recalculate USDG TVL from the latest on-chain reserves/price on
-          // every enrichment pass. This avoids preserving an old null TVL.
-          if (updated.reserveX && updated.reserveY) {
-            const tvlEstimate = estimateTvlFromUSDG(
-              updated.tokenA,
-              updated.tokenB,
-              updated.decimalsA,
-              updated.decimalsB,
-              updated.reserveX,
-              updated.reserveY,
-              updated.currentPrice ?? 0,
-            );
-            if (tvlEstimate.tvl != null) updated.tvl = tvlEstimate.tvl;
-            if ((!updated.currentPrice || !Number.isFinite(updated.currentPrice)) && tvlEstimate.priceXInY > 0) {
-              updated.currentPrice = tvlEstimate.priceXInY;
-            }
-          }
+if (Object.keys(rpcData).length > 0) {
+  const updated: IndexedPool = {
+    ...pool,
+    ...rpcData,
+  };
 
+  // Recalculate USDG TVL from the latest on-chain reserves.
+  if (updated.reserveX && updated.reserveY) {
+    const tvlEstimate = estimateTvlFromUSDG(
+      updated.tokenA,
+      updated.tokenB,
+      updated.decimalsA,
+      updated.decimalsB,
+      updated.reserveX,
+      updated.reserveY,
+      updated.currentPrice ?? 0
+    );
+
+    if (tvlEstimate.tvl != null) {
+      updated.tvl = tvlEstimate.tvl;
+    }
+
+    if (
+      (!updated.currentPrice ||
+        !Number.isFinite(updated.currentPrice)) &&
+      tvlEstimate.priceXInY > 0
+    ) {
+      updated.currentPrice = tvlEstimate.priceXInY;
+    }
+  }
+
+  // Recalculate analytics using the newest TVL.
+  const analytics = computeAnalytics(updated);
+
+  indexerStore.upsertPool({
+    ...updated,
+    ...analytics,
+  });
+
+  updatedPools.push(pool.address);
+}
           const analytics = computeAnalytics(updated);
           indexerStore.upsertPool({ ...updated, ...analytics });
         } catch { /* skip */ }
