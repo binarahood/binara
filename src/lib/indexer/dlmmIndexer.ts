@@ -259,7 +259,7 @@ async function fetchPoolVolumeFromSubgraph(poolId: string): Promise<SubgraphPool
   const h24 = now - 86400;
 
   const query = `
-    query GetPoolVolume($poolId: String!, $chainId: Int!, $h1: String!, $h6: String!, $h24: String!) {
+    query GetPoolVolume($poolId: String!, $chainId: Int!, $h1: Int!, $h6: Int!, $h24: Int!) {
       vol1h: DLMMSwap_aggregate(
         where: { pool: { _eq: $poolId }, chainId: { _eq: $chainId }, timestamp: { _gte: $h1 } }
       ) { aggregate { sum { amountUSD } count } }
@@ -276,9 +276,9 @@ async function fetchPoolVolumeFromSubgraph(poolId: string): Promise<SubgraphPool
     const data = await subgraphQuery(query, {
       poolId: poolId.toLowerCase(),
       chainId: CHAIN_ID,
-      h1: String(h1),
-      h6: String(h6),
-      h24: String(h24),
+      h1,
+      h6,
+      h24,
     }) as SubgraphPoolVolume;
     return data;
   } catch {
@@ -329,6 +329,50 @@ interface SubgraphPoolVolume {
   vol1h?: { aggregate?: { sum?: { amountUSD?: string | null }; count?: number } };
   vol6h?: { aggregate?: { sum?: { amountUSD?: string | null }; count?: number } };
   vol24h?: { aggregate?: { sum?: { amountUSD?: string | null }; count?: number } };
+}
+
+// ─── Lightweight USD valuation fallback ────────────────────────────────────────
+/**
+ * Estimate TVL when the subgraph does not provide totalValueLockedUSD.
+ *
+ * This is intentionally conservative: only pools containing USDG are valued,
+ * because USDG is the one quote asset we can treat as approximately $1 here.
+ * For all other pairs we return null rather than inventing a USD price.
+ */
+function estimateTvlFromUSDG(
+  tokenX: string,
+  tokenY: string,
+  decimalsX: number,
+  decimalsY: number,
+  reserveX: string,
+  reserveY: string,
+  priceXInY: number,
+): number | null {
+  try {
+    const x = Number(BigInt(reserveX || '0')) / 10 ** decimalsX;
+    const y = Number(BigInt(reserveY || '0')) / 10 ** decimalsY;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) return null;
+
+    const isXUSDG = tokenX.toLowerCase() === USDG_ADDRESS.toLowerCase();
+    const isYUSDG = tokenY.toLowerCase() === USDG_ADDRESS.toLowerCase();
+
+    if (isXUSDG) {
+      // priceXInY = USDG units per tokenX, so tokenY USD value = y.
+      // tokenX is already approximately USD-denominated.
+      const value = x + y;
+      return Number.isFinite(value) && value > 0 ? value : null;
+    }
+
+    if (isYUSDG && priceXInY > 0) {
+      // priceXInY = USDG per tokenX.
+      const value = x * priceXInY + y;
+      return Number.isFinite(value) && value > 0 ? value : null;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ─── Pool enrichment via RPC ──────────────────────────────────────────────────
@@ -469,8 +513,21 @@ async function processPools(subgraphPools: SubgraphPool[]): Promise<void> {
       // Actual fee is dynamic but we use the static base as a floor
       const baseFeePercent = sp.binStep * 0.01; // e.g. binStep=5 → 0.05%
 
-      const tvlUSD = sp.totalValueLockedUSD ? parseFloat(sp.totalValueLockedUSD) : null;
+      const subgraphTvlUSD = sp.totalValueLockedUSD ? parseFloat(sp.totalValueLockedUSD) : null;
       const vol24hUSD = sp.volumeUSD ? parseFloat(sp.volumeUSD) : null;
+
+      const fallbackTvlUSD = subgraphTvlUSD == null
+        ? estimateTvlFromUSDG(
+            sp.tokenX.id,
+            sp.tokenY.id,
+            decimalsA,
+            decimalsB,
+            sp.reserveX || '0',
+            sp.reserveY || '0',
+            sp.activeId != null ? priceFromBinId(sp.activeId, sp.binStep) : 0,
+          )
+        : null;
+      const tvlUSD = subgraphTvlUSD ?? fallbackTvlUSD;
 
       // Active bin and price
       let activeBin = sp.activeId ?? null;
@@ -693,6 +750,15 @@ async function scanFactoryViaRPC(): Promise<void> {
         const currentPrice = priceFromBinId(activeBin, binStep);
         const existing = indexerStore.getPool(pairAddress);
         const baseFeePercent = binStep * 0.01;
+        const fallbackTvlUSD = estimateTvlFromUSDG(
+          tokenX,
+          tokenY,
+          metaX.decimals,
+          metaY.decimals,
+          reserveX,
+          reserveY,
+          currentPrice,
+        );
 
         const pool: IndexedPool = {
           address: pairAddress,
@@ -711,8 +777,9 @@ async function scanFactoryViaRPC(): Promise<void> {
           fee: baseFeePercent,
           reserveX,
           reserveY,
-          // Do not invent a USD valuation when no independent price is available.
-          tvl: existing?.tvl ?? null,
+          // Use subgraph TVL when available; otherwise use the conservative
+          // USDG-backed estimate for stablecoin quote pools only.
+          tvl: existing?.tvl ?? fallbackTvlUSD,
           volume1m: existing?.volume1m ?? 0,
           volume5m: existing?.volume5m ?? 0,
           volume15m: existing?.volume15m ?? 0,
@@ -751,6 +818,11 @@ async function scanFactoryViaRPC(): Promise<void> {
     poolsDiscovered: indexerStore.getAllPools().length,
     error: null,
   });
+
+  // Pool discovery can fall back to RPC while the subgraph may still be able
+  // to answer swap/volume queries. Try that independently so volume does not
+  // stay N/A just because DLMMPool discovery failed.
+  await enrichVolumeFromSubgraph();
 }
 
 // ─── Incremental update (called on each new block) ────────────────────────────
