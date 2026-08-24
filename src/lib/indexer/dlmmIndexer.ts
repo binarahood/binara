@@ -586,16 +586,19 @@ async function enrichPoolFromRPC(
       );
     }
 
-    console.log(
-      `[RPC DEBUG] ${pool.pair} FINAL:`,
-      {
-        activeBin,
-        binStep,
-        currentPrice,
-        reserveX,
-        reserveY,
-        decimalsA,
-        decimalsB,
+   const reservesHex = await ethCall(
+  pool.address,
+  LBPAIR_GET_RESERVES
+);
+
+console.log(
+  `[RPC DEBUG] ${pool.pair} RAW getReserves():`,
+  reservesHex
+);
+
+const clean = reservesHex.startsWith('0x')
+  ? reservesHex.slice(2)
+  : reservesHex;
       }
     );
 
