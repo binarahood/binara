@@ -1,5 +1,5 @@
 /**
- * Ramses DLMM Indexer V12 — Robinhood Chain (4663)
+ * Ramses DLMM Indexer V13 — Robinhood Chain (4663)
  *
  * Design goals:
  *  - Fast warm requests: discovery, RPC enrichment and volume refresh are cached.
@@ -51,8 +51,8 @@ const FACTORY_CONCURRENCY = Math.max(1, Number(process.env.DLMM_FACTORY_CONCURRE
 const SWAP_PAGE_SIZE = Math.min(1000, Math.max(100, Number(process.env.DLMM_SWAP_PAGE_SIZE || 1000)));
 const SWAP_MAX_PAGES = Math.min(12, Math.max(1, Number(process.env.DLMM_SWAP_MAX_PAGES || 8)));
 const SWAP_REFRESH_POOLS = Math.max(1, Number(process.env.DLMM_SWAP_REFRESH_POOLS || 12));
-const GLOBAL_SWAP_LIMIT = Math.min(5000, Math.max(500, Number(process.env.DLMM_GLOBAL_SWAP_LIMIT || 5000)));
-const GLOBAL_SWAP_MAX_PAGES = Math.min(12, Math.max(1, Number(process.env.DLMM_GLOBAL_SWAP_MAX_PAGES || 8)));
+const GLOBAL_SWAP_LIMIT = Math.min(12000, Math.max(1000, Number(process.env.DLMM_GLOBAL_SWAP_LIMIT || 12000)));
+const GLOBAL_SWAP_MAX_PAGES = Math.min(12, Math.max(1, Number(process.env.DLMM_GLOBAL_SWAP_MAX_PAGES || 12)));
 const VOLUME_FALLBACK_POOL_LIMIT = Math.min(25, Math.max(3, Number(process.env.DLMM_VOLUME_FALLBACK_POOLS || 12)));
 
 let indexerRunning = false;
@@ -338,7 +338,10 @@ async function enrichUSDGPools(): Promise<void> {
 
 function safeTimestampSeconds(value: unknown): number {
   const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? n : 0;
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  // Most subgraphs expose Unix seconds. Be tolerant if a provider returns ms.
+  if (n > 100_000_000_000) return n / 1000;
+  return n;
 }
 
 function swapPrice(s: SubgraphSwap, pool: IndexedPool): number | null {
@@ -477,9 +480,9 @@ async function fetchRecentSwapsGlobalFiltered(cutoffSeconds: number): Promise<Su
   // First choice: let the indexer do the 24h filtering. This is the cheapest
   // and most accurate path when the timestamp filter is supported.
   const query = `
-    query GetRecentSwaps($since: Int!, $limit: Int!) {
+    query GetRecentSwaps($since: Int!, $chainId: Int!, $limit: Int!) {
       DLMMSwap(
-        where: { timestamp: { _gte: $since } }
+        where: { chainId: { _eq: $chainId }, timestamp: { _gte: $since } }
         limit: $limit
         order_by: { timestamp: desc }
       ) {
@@ -490,6 +493,7 @@ async function fetchRecentSwapsGlobalFiltered(cutoffSeconds: number): Promise<Su
 
   const data = await subgraphQuery(query, {
     since: cutoffSeconds,
+    chainId: CHAIN_ID,
     limit: GLOBAL_SWAP_LIMIT,
   }) as { DLMMSwap?: SubgraphSwap[] };
 
@@ -502,8 +506,9 @@ async function fetchRecentSwapsGlobalPaged(cutoffSeconds: number): Promise<Subgr
   // Fallback query intentionally has no timestamp predicate. That keeps it
   // compatible with subgraphs that expose timestamp as a non-Int scalar.
   const query = `
-    query GetRecentSwaps($limit: Int!, $offset: Int!) {
+    query GetRecentSwaps($chainId: Int!, $limit: Int!, $offset: Int!) {
       DLMMSwap(
+        where: { chainId: { _eq: $chainId } }
         limit: $limit
         offset: $offset
         order_by: { timestamp: desc }
@@ -515,6 +520,7 @@ async function fetchRecentSwapsGlobalPaged(cutoffSeconds: number): Promise<Subgr
 
   for (let page = 0; page < GLOBAL_SWAP_MAX_PAGES; page++) {
     const data = await subgraphQuery(query, {
+      chainId: CHAIN_ID,
       limit: SWAP_PAGE_SIZE,
       offset: page * SWAP_PAGE_SIZE,
     }) as { DLMMSwap?: SubgraphSwap[] };
@@ -571,26 +577,42 @@ async function fetchGlobalRecentSwaps(cutoffSeconds: number): Promise<GlobalSwap
 }
 
 function calculateSwapUSD(s: SubgraphSwap, pool: IndexedPool): number | null {
+  // Prefer the indexer's own USD valuation when present. Some swaps have a
+  // null amountUSD, so do not let one unpriced row invalidate the whole pool.
   const direct = numOrNull(s.amountUSD);
-  if (direct != null) return direct;
+  if (direct != null && direct > 0) return direct;
 
-  const amountInRaw = Number(s.amountIn);
-  if (!Number.isFinite(amountInRaw) || amountInRaw <= 0) return null;
-
-  const tokenIn = s.tokenIn.toLowerCase();
+  const tokenIn = String(s.tokenIn || '').toLowerCase();
+  const tokenOut = String(s.tokenOut || '').toLowerCase();
+  const tokenA = pool.tokenA.toLowerCase();
+  const tokenB = pool.tokenB.toLowerCase();
   const aIsUSDG = isUSDGToken(pool.tokenA);
   const bIsUSDG = isUSDGToken(pool.tokenB);
 
-  if (tokenIn === pool.tokenA.toLowerCase()) {
-    const amountIn = amountInRaw / 10 ** pool.decimalsA;
-    if (aIsUSDG) return amountIn;
-    if (bIsUSDG && (pool.currentPrice ?? 0) > 0) return amountIn * (pool.currentPrice as number);
+  // For USDG pairs, the USDG leg is the most reliable fallback because USDG
+  // is treated as $1 here. This works even when currentPrice is unavailable.
+  const amountInRaw = Number(s.amountIn);
+  const amountOutRaw = Number(s.amountOut);
+
+  if (aIsUSDG && tokenIn === tokenA && Number.isFinite(amountInRaw) && amountInRaw > 0) {
+    return amountInRaw / 10 ** pool.decimalsA;
+  }
+  if (bIsUSDG && tokenIn === tokenB && Number.isFinite(amountInRaw) && amountInRaw > 0) {
+    return amountInRaw / 10 ** pool.decimalsB;
+  }
+  if (aIsUSDG && tokenOut === tokenA && Number.isFinite(amountOutRaw) && amountOutRaw > 0) {
+    return amountOutRaw / 10 ** pool.decimalsA;
+  }
+  if (bIsUSDG && tokenOut === tokenB && Number.isFinite(amountOutRaw) && amountOutRaw > 0) {
+    return amountOutRaw / 10 ** pool.decimalsB;
   }
 
-  if (tokenIn === pool.tokenB.toLowerCase()) {
-    const amountIn = amountInRaw / 10 ** pool.decimalsB;
-    if (bIsUSDG) return amountIn;
-    if (aIsUSDG && (pool.currentPrice ?? 0) > 0) return amountIn / (pool.currentPrice as number);
+  // Last resort for a USDG pair: value the non-stable leg using the current
+  // pool price. This is less authoritative than the USDG amount but still
+  // useful when the swap payload is missing its stable-side amount.
+  if (Number.isFinite(amountInRaw) && amountInRaw > 0 && (pool.currentPrice ?? 0) > 0) {
+    if (tokenIn === tokenA && bIsUSDG) return (amountInRaw / 10 ** pool.decimalsA) * (pool.currentPrice as number);
+    if (tokenIn === tokenB && aIsUSDG) return (amountInRaw / 10 ** pool.decimalsB) / (pool.currentPrice as number);
   }
 
   return null;
@@ -608,6 +630,8 @@ interface PoolVolumeResult {
   swapCount1h: number;
   swapCount24h: number;
   usdComplete: boolean;
+  valuedSwapCount: number;
+  totalSwapCount: number;
 }
 
 function aggregatePoolSwaps(pool: IndexedPool, swaps: SubgraphSwap[], now = Date.now()): PoolVolumeResult & { volatility: number } {
@@ -627,10 +651,17 @@ function aggregatePoolSwaps(pool: IndexedPool, swaps: SubgraphSwap[], now = Date
   let swapCount1h = 0;
   let swapCount24h = 0;
   let usdComplete = true;
+  let valuedSwapCount = 0;
 
   for (const s of swaps) {
     const t = safeTimestampSeconds(s.timestamp) * 1000;
     if (!t || t < h24) continue;
+
+    // Swap counts are independent from USD valuation. A swap with a missing
+    // amountUSD still counts as activity; only the USD volume contribution is
+    // omitted when it cannot be valued safely.
+    swapCount24h++;
+    if (t >= h1) swapCount1h++;
 
     const usd = calculateSwapUSD(s, pool);
     if (usd == null) {
@@ -638,16 +669,13 @@ function aggregatePoolSwaps(pool: IndexedPool, swaps: SubgraphSwap[], now = Date
       continue;
     }
 
+    valuedSwapCount++;
     volume24h += usd;
-    swapCount24h++;
     if (t >= h6) volume6h += usd;
     if (t >= m15) volume15m += usd;
     if (t >= m5) volume5m += usd;
     if (t >= m1) volume1m += usd;
-    if (t >= h1) {
-      volume1h += usd;
-      swapCount1h++;
-    }
+    if (t >= h1) volume1h += usd;
   }
 
   return {
@@ -663,6 +691,8 @@ function aggregatePoolSwaps(pool: IndexedPool, swaps: SubgraphSwap[], now = Date
     swapCount24h,
     usdComplete,
     volatility: calculateRealizedVolatility(pool, swaps, now),
+    valuedSwapCount,
+    totalSwapCount: swapCount24h,
   };
 }
 
@@ -678,6 +708,7 @@ async function refreshPoolVolumes(): Promise<void> {
   let failed = 0;
   let swapsSeen = global.swaps.length;
   let usdPools = 0;
+  let partialUsdPools = 0;
   let firstError = global.error || '';
 
   // Fast path: one global dataset, local aggregation for every pool.
@@ -705,9 +736,9 @@ async function refreshPoolVolumes(): Promise<void> {
           volume1h: result.volume1h,
           volume6h: result.volume6h,
           volume24h: result.volume24h,
-          volumeUSD1h: result.usdComplete ? result.volume1h : null,
-          volumeUSD6h: result.usdComplete ? result.volume6h : null,
-          volumeUSD24h: result.usdComplete ? result.volume24h : null,
+          volumeUSD1h: result.valuedSwapCount > 0 ? result.volume1h : null,
+          volumeUSD6h: result.valuedSwapCount > 0 ? result.volume6h : null,
+          volumeUSD24h: result.valuedSwapCount > 0 ? result.volume24h : null,
           swapCount1h: result.swapCount1h,
           swapCount24h: result.swapCount24h,
           volatility: result.volatility,
@@ -718,6 +749,7 @@ async function refreshPoolVolumes(): Promise<void> {
         indexerStore.upsertPool(updated);
 
         if (result.usdComplete || swaps.length === 0) usdPools++;
+        else if (result.valuedSwapCount > 0) partialUsdPools++;
 
         for (const s of swaps.slice(0, 250)) {
           const ts = safeTimestampSeconds(s.timestamp);
@@ -751,7 +783,7 @@ async function refreshPoolVolumes(): Promise<void> {
 
     if (indexedSwapKeys.size > 25_000) indexedSwapKeys.clear();
 
-    console.log('[DLMM V12] volume refresh:', {
+    console.log('[DLMM V13] volume refresh:', {
       selected: all.length,
       success,
       failed,
@@ -790,9 +822,9 @@ async function refreshPoolVolumes(): Promise<void> {
         volume1h: result.volume1h,
         volume6h: result.volume6h,
         volume24h: result.volume24h,
-        volumeUSD1h: result.usdComplete ? result.volume1h : null,
-        volumeUSD6h: result.usdComplete ? result.volume6h : null,
-        volumeUSD24h: result.usdComplete ? result.volume24h : null,
+        volumeUSD1h: result.valuedSwapCount > 0 ? result.volume1h : null,
+        volumeUSD6h: result.valuedSwapCount > 0 ? result.volume6h : null,
+        volumeUSD24h: result.valuedSwapCount > 0 ? result.volume24h : null,
         swapCount1h: result.swapCount1h,
         swapCount24h: result.swapCount24h,
         volatility: result.volatility,
@@ -804,18 +836,20 @@ async function refreshPoolVolumes(): Promise<void> {
       success++;
       swapsSeen += swaps.length;
       if (result.usdComplete || swaps.length === 0) usdPools++;
+      else if (result.valuedSwapCount > 0) partialUsdPools++;
     } catch (err) {
       failed++;
       if (!firstError) firstError = err instanceof Error ? err.message : String(err);
     }
   });
 
-  console.log('[DLMM V12] volume refresh:', {
+  console.log('[DLMM V13] volume refresh:', {
     selected: selected.length,
     success,
     failed,
     swapsSeen,
     usdPools,
+    partialUsdPools,
     source: 'pool-fallback',
     globalComplete: false,
     firstError: firstError || null,
