@@ -1,5 +1,3 @@
-'use server';
-
 import { after, NextResponse } from 'next/server';
 import { runIndexer } from '@/lib/indexer/dlmmIndexer';
 import { indexerStore, IndexedPool } from '@/lib/indexer/store';
@@ -7,17 +5,16 @@ import { indexerStore, IndexedPool } from '@/lib/indexer/store';
 const CHAIN_ID = 4663;
 const RPC_URL = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
 
-async function rpcCall(method: string, params: unknown[] = []): Promise<unknown> {
+async function rpcCall(method: string, params: unknown[] = []): Promise<any> {
   const res = await fetch(RPC_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
     cache: 'no-store',
-    signal: AbortSignal.timeout(10_000),
   });
 
   if (!res.ok) {
-    throw new Error(`RPC HTTP ${res.status}`);
+    throw new Error(`RPC HTTP error: ${res.status}`);
   }
 
   const data = await res.json();
@@ -26,7 +23,7 @@ async function rpcCall(method: string, params: unknown[] = []): Promise<unknown>
   }
 
   if (data?.result === undefined) {
-    throw new Error('RPC returned no result');
+    throw new Error('RPC response did not contain a result');
   }
 
   return data.result;
