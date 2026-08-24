@@ -36,6 +36,7 @@ const FACTORY_GET_LB_PAIR_AT_INDEX = '0x7daf5d66'; // getLBPairAtIndex(uint256)
 // LBPair ABI selectors (for eth_call)
 const LBPAIR_GET_ACTIVE_ID = '0xdbe65edc';
 const LBPAIR_GET_RESERVES = '0x0902f1ac';
+const LBPAIR_GET_BIN_STEP = '0x4f4a8b22'; // getBinStep()
 const LBPAIR_GET_BIN = '0xf7888aec'; // getBin(uint24)
 const LBPAIR_GET_NEXT_NON_EMPTY_BIN = '0xa41a01fb'; // getNextNonEmptyBin(bool,uint24)
 const LBPAIR_GET_STATIC_FEE = '0x7ca0de30';       // getStaticFeeParameters()
@@ -502,9 +503,7 @@ async function enrichPoolFromRPC(
   pool: IndexedPool
 ): Promise<Partial<IndexedPool>> {
   try {
-    // ============================================================
-    // 1. Get active bin
-    // ============================================================
+    // 1. Get active bin directly from the pool contract
     const activeIdHex = await ethCall(
       pool.address,
       LBPAIR_GET_ACTIVE_ID
@@ -512,9 +511,28 @@ async function enrichPoolFromRPC(
 
     const activeBin = decodeUint24(activeIdHex);
 
-    // ============================================================
-    // 2. Get latest token decimals
-    // ============================================================
+    // 2. Get binStep directly from the pool contract
+    let binStep = pool.binStep;
+
+    try {
+      const binStepHex = await ethCall(
+        pool.address,
+        LBPAIR_GET_BIN_STEP
+      );
+
+      binStep = decodeUint16(binStepHex);
+
+      console.log(
+        `[RPC DEBUG] ${pool.pair} binStep=${binStep}`
+      );
+    } catch (err) {
+      console.error(
+        `[RPC DEBUG] ${pool.pair} getBinStep FAILED:`,
+        err
+      );
+    }
+
+    // 3. Get token decimals
     let decimalsA = pool.decimalsA ?? 18;
     let decimalsB = pool.decimalsB ?? 18;
 
@@ -527,22 +545,18 @@ async function enrichPoolFromRPC(
       decimalsA = metaA.decimals;
       decimalsB = metaB.decimals;
     } catch {
-      // Keep existing decimals if metadata lookup fails.
+      // Keep existing decimals
     }
 
-    // ============================================================
-    // 3. Calculate human-readable price
-    // ============================================================
+    // 4. Calculate price using ON-CHAIN binStep
     const currentPrice = priceFromBinId(
       activeBin,
-      pool.binStep,
+      binStep,
       decimalsA,
       decimalsB
     );
 
-    // ============================================================
-    // 4. Get total reserves
-    // ============================================================
+    // 5. Read total reserves
     let reserveX = pool.reserveX;
     let reserveY = pool.reserveY;
 
@@ -565,14 +579,18 @@ async function enrichPoolFromRPC(
           '0x' + clean.slice(64, 128)
         ).toString();
       }
-    } catch {
-      // Keep existing reserves if RPC reserve call fails.
+    } catch (err) {
+      console.error(
+        `[RPC DEBUG] ${pool.pair} getReserves FAILED:`,
+        err
+      );
     }
 
     console.log(
       `[RPC DEBUG] ${pool.pair} FINAL:`,
       {
         activeBin,
+        binStep,
         currentPrice,
         reserveX,
         reserveY,
@@ -583,6 +601,7 @@ async function enrichPoolFromRPC(
 
     return {
       activeBin,
+      binStep,
       currentPrice,
       reserveX,
       reserveY,
