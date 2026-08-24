@@ -1,5 +1,5 @@
 /**
- * Ramses DLMM Indexer for Robinhood Chain (Chain ID 4663)
+ * Ramses DLMM Indexer V6 for Robinhood Chain (Chain ID 4663)
  *
  * Protocol: Ramses DLMM
  * Factory:  0xdcD5F77697914E27f56FD263EF82923C8524AbAc
@@ -24,6 +24,8 @@ const RPC_URL = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robi
 // Known quote assets on Robinhood Chain
 const WETH_ADDRESS = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73';
 const USDG_ADDRESS = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
+const USDG_DECIMALS = 6;
+const USDG_USD_PRICE = 1;
 
 // Ramses DLMM Factory ABI fragments (minimal, for eth_call)
 const FACTORY_GET_NUMBER_OF_LB_PAIRS = '0x4e937c3a'; // getNumberOfLBPairs()
@@ -139,7 +141,7 @@ async function getTokenMetadata(address: string): Promise<{ symbol: string; deci
     return meta;
   }
   if (addr === USDG_ADDRESS.toLowerCase()) {
-    const meta = { symbol: 'USDG', decimals: 18 };
+    const meta = { symbol: 'USDG', decimals: USDG_DECIMALS };
     tokenCache.set(addr, meta);
     return meta;
   }
@@ -349,24 +351,41 @@ function estimateTvlFromUSDG(
   priceXInY: number,
 ): number | null {
   try {
-    const x = Number(BigInt(reserveX || '0')) / 10 ** decimalsX;
-    const y = Number(BigInt(reserveY || '0')) / 10 ** decimalsY;
+    const xRaw = BigInt(reserveX || '0');
+    const yRaw = BigInt(reserveY || '0');
+    const x = Number(xRaw) / 10 ** decimalsX;
+    const y = Number(yRaw) / 10 ** decimalsY;
+
     if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) return null;
 
     const isXUSDG = tokenX.toLowerCase() === USDG_ADDRESS.toLowerCase();
     const isYUSDG = tokenY.toLowerCase() === USDG_ADDRESS.toLowerCase();
 
+    if (!isXUSDG && !isYUSDG) return null;
+
+    // USDG is a USD-denominated stablecoin. Its canonical Robinhood Chain
+    // contract uses 6 decimals, so y/x must be normalized before valuation.
     if (isXUSDG) {
-      // priceXInY = USDG units per tokenX, so tokenY USD value = y.
-      // tokenX is already approximately USD-denominated.
-      const value = x + y;
-      return Number.isFinite(value) && value > 0 ? value : null;
+      // If token X is USDG, token Y is worth USDG-per-token-Y according to
+      // the DLMM price formula. For TVL we need both sides in USD.
+      if (priceXInY > 0 && Number.isFinite(priceXInY)) {
+        const tokenYPriceUSD = 1 / priceXInY;
+        const value = x * USDG_USD_PRICE + y * tokenYPriceUSD;
+        if (Number.isFinite(value) && value > 0) return value;
+      }
+      // Conservative fallback if the bin price is unavailable/invalid.
+      return x > 0 ? x * USDG_USD_PRICE : null;
     }
 
-    if (isYUSDG && priceXInY > 0) {
-      // priceXInY = USDG per tokenX.
-      const value = x * priceXInY + y;
-      return Number.isFinite(value) && value > 0 ? value : null;
+    if (isYUSDG) {
+      // priceXInY is USDG units per token X, therefore it is also the
+      // approximate USD price of token X because USDG ≈ $1.
+      if (priceXInY > 0 && Number.isFinite(priceXInY)) {
+        const value = x * priceXInY * USDG_USD_PRICE + y * USDG_USD_PRICE;
+        if (Number.isFinite(value) && value > 0) return value;
+      }
+      // Conservative fallback if the bin price is unavailable/invalid.
+      return y > 0 ? y * USDG_USD_PRICE : null;
     }
 
     return null;
@@ -513,7 +532,8 @@ async function processPools(subgraphPools: SubgraphPool[]): Promise<void> {
       // Actual fee is dynamic but we use the static base as a floor
       const baseFeePercent = sp.binStep * 0.01; // e.g. binStep=5 → 0.05%
 
-      const subgraphTvlUSD = sp.totalValueLockedUSD ? parseFloat(sp.totalValueLockedUSD) : null;
+      const parsedSubgraphTvl = sp.totalValueLockedUSD ? parseFloat(sp.totalValueLockedUSD) : NaN;
+      const subgraphTvlUSD = Number.isFinite(parsedSubgraphTvl) && parsedSubgraphTvl > 0 ? parsedSubgraphTvl : null;
       const vol24hUSD = sp.volumeUSD ? parseFloat(sp.volumeUSD) : null;
 
       const fallbackTvlUSD = subgraphTvlUSD == null
@@ -647,7 +667,23 @@ async function enrichExistingPools(): Promise<void> {
       batch.map(async (pool) => {
         try {
           const rpcData = await enrichPoolFromRPC(pool);
-          const updated = { ...pool, ...rpcData };
+          const updated: IndexedPool = { ...pool, ...rpcData };
+
+          // Recalculate USDG TVL from the latest on-chain reserves/price on
+          // every enrichment pass. This avoids preserving an old null TVL.
+          if (updated.reserveX && updated.reserveY && updated.currentPrice) {
+            const fallbackTvlUSD = estimateTvlFromUSDG(
+              updated.tokenA,
+              updated.tokenB,
+              updated.decimalsA,
+              updated.decimalsB,
+              updated.reserveX,
+              updated.reserveY,
+              updated.currentPrice,
+            );
+            if (fallbackTvlUSD != null) updated.tvl = fallbackTvlUSD;
+          }
+
           const analytics = computeAnalytics(updated);
           indexerStore.upsertPool({ ...updated, ...analytics });
         } catch { /* skip */ }
@@ -779,7 +815,7 @@ async function scanFactoryViaRPC(): Promise<void> {
           reserveY,
           // Use subgraph TVL when available; otherwise use the conservative
           // USDG-backed estimate for stablecoin quote pools only.
-          tvl: existing?.tvl ?? fallbackTvlUSD,
+          tvl: fallbackTvlUSD ?? existing?.tvl ?? null,
           volume1m: existing?.volume1m ?? 0,
           volume5m: existing?.volume5m ?? 0,
           volume15m: existing?.volume15m ?? 0,
