@@ -1,5 +1,5 @@
 /**
- * Ramses DLMM Indexer V13 — Robinhood Chain (4663)
+ * Ramses DLMM Indexer V14 — Robinhood Chain (4663)
  *
  * Design goals:
  *  - Fast warm requests: discovery, RPC enrichment and volume refresh are cached.
@@ -177,7 +177,7 @@ interface SubgraphPool {
   feesUSD: string | null; txCount: number; createdAtBlockNumber: number; createdAtTimestamp: number; isAlive: boolean;
 }
 interface SubgraphSwap {
-  id: string; pool: string; transaction: string; timestamp: number; blockNumber: number;
+  id: string; pool: string; transaction: string; timestamp: number; blockNumber?: number | null;
   tokenIn: string; tokenOut: string; amountIn: string; amountOut: string; amountUSD: string | null; activeBinId: number;
 }
 
@@ -462,7 +462,7 @@ async function fetchRecentSwapsForPool(poolId: string, limit = 100): Promise<Sub
         limit: $limit
         order_by: { timestamp: desc }
       ) {
-        id pool transaction timestamp blockNumber tokenIn tokenOut amountIn amountOut amountUSD activeBinId
+        id pool transaction timestamp tokenIn tokenOut amountIn amountOut amountUSD activeBinId
       }
     }
   `;
@@ -486,7 +486,7 @@ async function fetchRecentSwapsGlobalFiltered(cutoffSeconds: number): Promise<Su
         limit: $limit
         order_by: { timestamp: desc }
       ) {
-        id pool transaction timestamp blockNumber tokenIn tokenOut amountIn amountOut amountUSD activeBinId
+        id pool transaction timestamp tokenIn tokenOut amountIn amountOut amountUSD activeBinId
       }
     }
   `;
@@ -513,7 +513,7 @@ async function fetchRecentSwapsGlobalPaged(cutoffSeconds: number): Promise<Subgr
         offset: $offset
         order_by: { timestamp: desc }
       ) {
-        id pool transaction timestamp blockNumber tokenIn tokenOut amountIn amountOut amountUSD activeBinId
+        id pool transaction timestamp tokenIn tokenOut amountIn amountOut amountUSD activeBinId
       }
     }
   `;
@@ -762,7 +762,7 @@ async function refreshPoolVolumes(): Promise<void> {
           indexerStore.addSwap({
             poolAddress: pool.address,
             txHash: s.transaction,
-            blockNumber: Number(s.blockNumber),
+            blockNumber: Number(s.blockNumber ?? 0),
             timestamp: ts,
             tokenIn: s.tokenIn,
             tokenOut: s.tokenOut,
@@ -783,7 +783,7 @@ async function refreshPoolVolumes(): Promise<void> {
 
     if (indexedSwapKeys.size > 25_000) indexedSwapKeys.clear();
 
-    console.log('[DLMM V13] volume refresh:', {
+    console.log('[DLMM V14] volume refresh:', {
       selected: all.length,
       success,
       failed,
@@ -843,7 +843,7 @@ async function refreshPoolVolumes(): Promise<void> {
     }
   });
 
-  console.log('[DLMM V13] volume refresh:', {
+  console.log('[DLMM V14] volume refresh:', {
     selected: selected.length,
     success,
     failed,
