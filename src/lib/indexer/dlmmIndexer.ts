@@ -1,5 +1,5 @@
 /**
- * Ramses DLMM Indexer V7 for Robinhood Chain (Chain ID 4663)
+ * Ramses DLMM Indexer V8 for Robinhood Chain (Chain ID 4663)
  *
  * Protocol: Ramses DLMM
  * Factory:  0xdcD5F77697914E27f56FD263EF82923C8524AbAc
@@ -11,7 +11,7 @@
  *
  * This indexer is READ-ONLY. It never submits transactions.
  *
- * V7 fixes DLMM price normalization across ERC-20 decimals before USDG TVL valuation.
+ * V8 fixes USDG TVL source precedence and adds a reserve-ratio price fallback when the bin price is unavailable or invalid.
  */
 
 import { indexerStore, IndexedPool, IndexedSwap } from './store';
@@ -364,6 +364,62 @@ interface SubgraphPoolVolume {
  * because USDG is the one quote asset we can treat as approximately $1 here.
  * For all other pairs we return null rather than inventing a USD price.
  */
+function isUSDGToken(address: string): boolean {
+  return address.toLowerCase() === USDG_ADDRESS.toLowerCase();
+}
+
+function humanReserve(raw: string, decimals: number): number {
+  try {
+    const value = BigInt(raw || '0');
+    const n = Number(value);
+    const result = n / 10 ** decimals;
+    return Number.isFinite(result) && result >= 0 ? result : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * If the bin price is missing, use the pool's own reserve ratio as a last-resort
+ * price estimate for USDG pairs. This is not used for non-USDG pools.
+ *
+ * For X/USDG: priceXInY = reserveY / reserveX.
+ * For USDG/Y: priceXInY = reserveX / reserveY (because priceXInY means
+ * USDG-per-Y, while reserveX is USDG and reserveY is Y).
+ */
+function priceFromUSDGReserveRatio(
+  tokenX: string,
+  tokenY: string,
+  decimalsX: number,
+  decimalsY: number,
+  reserveX: string,
+  reserveY: string,
+): number {
+  const x = humanReserve(reserveX, decimalsX);
+  const y = humanReserve(reserveY, decimalsY);
+  if (x <= 0 || y <= 0) return 0;
+
+  const isXUSDG = isUSDGToken(tokenX);
+  const isYUSDG = isUSDGToken(tokenY);
+
+  if (isYUSDG && !isXUSDG) return y / x;
+  if (isXUSDG && !isYUSDG) return x / y;
+  return 0;
+}
+
+interface TvlEstimate {
+  tvl: number | null;
+  priceXInY: number;
+  source: 'bin' | 'reserve-ratio' | 'stable-side-only' | 'none';
+}
+
+/**
+ * Estimate USD TVL for USDG pools from live reserves.
+ *
+ * IMPORTANT: For USDG pairs we intentionally prefer this on-chain estimate
+ * over subgraph totalValueLockedUSD. The subgraph value can lag or be stale,
+ * while the reserves are read directly from the LBPair contract.
+ */
 function estimateTvlFromUSDG(
   tokenX: string,
   tokenY: string,
@@ -371,49 +427,63 @@ function estimateTvlFromUSDG(
   decimalsY: number,
   reserveX: string,
   reserveY: string,
-  priceXInY: number,
-): number | null {
+  binPriceXInY: number,
+): TvlEstimate {
   try {
-    const xRaw = BigInt(reserveX || '0');
-    const yRaw = BigInt(reserveY || '0');
-    const x = Number(xRaw) / 10 ** decimalsX;
-    const y = Number(yRaw) / 10 ** decimalsY;
+    const x = humanReserve(reserveX, decimalsX);
+    const y = humanReserve(reserveY, decimalsY);
+    if (x <= 0 && y <= 0) {
+      return { tvl: null, priceXInY: 0, source: 'none' };
+    }
 
-    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) return null;
+    const isXUSDG = isUSDGToken(tokenX);
+    const isYUSDG = isUSDGToken(tokenY);
+    if (!isXUSDG && !isYUSDG) {
+      return { tvl: null, priceXInY: 0, source: 'none' };
+    }
 
-    const isXUSDG = tokenX.toLowerCase() === USDG_ADDRESS.toLowerCase();
-    const isYUSDG = tokenY.toLowerCase() === USDG_ADDRESS.toLowerCase();
+    let priceXInY = Number.isFinite(binPriceXInY) && binPriceXInY > 0
+      ? binPriceXInY
+      : 0;
+    let source: TvlEstimate['source'] = priceXInY > 0 ? 'bin' : 'none';
 
-    if (!isXUSDG && !isYUSDG) return null;
+    // A reserve-ratio fallback guarantees USDG pools can still show a TVL
+    // when the active-bin read is unavailable or produces an unusable value.
+    if (priceXInY <= 0) {
+      priceXInY = priceFromUSDGReserveRatio(
+        tokenX, tokenY, decimalsX, decimalsY, reserveX, reserveY,
+      );
+      if (priceXInY > 0) source = 'reserve-ratio';
+    }
 
-    // USDG is a USD-denominated stablecoin. Its canonical Robinhood Chain
-    // contract uses 6 decimals, so y/x must be normalized before valuation.
-    if (isXUSDG) {
-      // If token X is USDG, token Y is worth USDG-per-token-Y according to
-      // the DLMM price formula. For TVL we need both sides in USD.
-      if (priceXInY > 0 && Number.isFinite(priceXInY)) {
+    if (isYUSDG && !isXUSDG) {
+      if (priceXInY > 0) {
+        const value = x * priceXInY + y;
+        if (Number.isFinite(value) && value > 0) {
+          return { tvl: value, priceXInY, source };
+        }
+      }
+      return y > 0
+        ? { tvl: y * USDG_USD_PRICE, priceXInY: 0, source: 'stable-side-only' }
+        : { tvl: null, priceXInY: 0, source: 'none' };
+    }
+
+    if (isXUSDG && !isYUSDG) {
+      if (priceXInY > 0) {
         const tokenYPriceUSD = 1 / priceXInY;
-        const value = x * USDG_USD_PRICE + y * tokenYPriceUSD;
-        if (Number.isFinite(value) && value > 0) return value;
+        const value = x + y * tokenYPriceUSD;
+        if (Number.isFinite(value) && value > 0) {
+          return { tvl: value, priceXInY, source };
+        }
       }
-      // Conservative fallback if the bin price is unavailable/invalid.
-      return x > 0 ? x * USDG_USD_PRICE : null;
+      return x > 0
+        ? { tvl: x * USDG_USD_PRICE, priceXInY: 0, source: 'stable-side-only' }
+        : { tvl: null, priceXInY: 0, source: 'none' };
     }
 
-    if (isYUSDG) {
-      // priceXInY is USDG units per token X, therefore it is also the
-      // approximate USD price of token X because USDG ≈ $1.
-      if (priceXInY > 0 && Number.isFinite(priceXInY)) {
-        const value = x * priceXInY * USDG_USD_PRICE + y * USDG_USD_PRICE;
-        if (Number.isFinite(value) && value > 0) return value;
-      }
-      // Conservative fallback if the bin price is unavailable/invalid.
-      return y > 0 ? y * USDG_USD_PRICE : null;
-    }
-
-    return null;
+    return { tvl: null, priceXInY: 0, source: 'none' };
   } catch {
-    return null;
+    return { tvl: null, priceXInY: 0, source: 'none' };
   }
 }
 
@@ -559,24 +629,34 @@ async function processPools(subgraphPools: SubgraphPool[]): Promise<void> {
       const subgraphTvlUSD = Number.isFinite(parsedSubgraphTvl) && parsedSubgraphTvl > 0 ? parsedSubgraphTvl : null;
       const vol24hUSD = sp.volumeUSD ? parseFloat(sp.volumeUSD) : null;
 
-      const fallbackTvlUSD = subgraphTvlUSD == null
-        ? estimateTvlFromUSDG(
-            sp.tokenX.id,
-            sp.tokenY.id,
-            decimalsA,
-            decimalsB,
-            sp.reserveX || '0',
-            sp.reserveY || '0',
-            sp.activeId != null ? priceFromBinId(sp.activeId, sp.binStep, decimalsA, decimalsB) : 0,
-          )
-        : null;
-      const tvlUSD = subgraphTvlUSD ?? fallbackTvlUSD;
-
       // Active bin and price
       let activeBin = sp.activeId ?? null;
       let currentPrice: number | null = null;
       if (activeBin !== null) {
         currentPrice = priceFromBinId(activeBin, sp.binStep, decimalsA, decimalsB);
+      }
+
+      const tvlEstimate = estimateTvlFromUSDG(
+        sp.tokenX.id,
+        sp.tokenY.id,
+        decimalsA,
+        decimalsB,
+        sp.reserveX || '0',
+        sp.reserveY || '0',
+        currentPrice ?? 0,
+      );
+
+      const hasUSDG = isUSDGToken(sp.tokenX.id) || isUSDGToken(sp.tokenY.id);
+      // For USDG pools, trust live reserve-based valuation first. For other
+      // pools, retain the subgraph's USD TVL when it is available.
+      const tvlUSD = hasUSDG
+        ? tvlEstimate.tvl
+        : subgraphTvlUSD;
+
+      // If the bin price is unavailable, expose the reserve-ratio estimate so
+      // USDG pools do not remain N/A while their reserves are non-zero.
+      if ((!currentPrice || !Number.isFinite(currentPrice)) && tvlEstimate.priceXInY > 0) {
+        currentPrice = tvlEstimate.priceXInY;
       }
 
       const existing = indexerStore.getPool(sp.id);
@@ -694,17 +774,20 @@ async function enrichExistingPools(): Promise<void> {
 
           // Recalculate USDG TVL from the latest on-chain reserves/price on
           // every enrichment pass. This avoids preserving an old null TVL.
-          if (updated.reserveX && updated.reserveY && updated.currentPrice) {
-            const fallbackTvlUSD = estimateTvlFromUSDG(
+          if (updated.reserveX && updated.reserveY) {
+            const tvlEstimate = estimateTvlFromUSDG(
               updated.tokenA,
               updated.tokenB,
               updated.decimalsA,
               updated.decimalsB,
               updated.reserveX,
               updated.reserveY,
-              updated.currentPrice,
+              updated.currentPrice ?? 0,
             );
-            if (fallbackTvlUSD != null) updated.tvl = fallbackTvlUSD;
+            if (tvlEstimate.tvl != null) updated.tvl = tvlEstimate.tvl;
+            if ((!updated.currentPrice || !Number.isFinite(updated.currentPrice)) && tvlEstimate.priceXInY > 0) {
+              updated.currentPrice = tvlEstimate.priceXInY;
+            }
           }
 
           const analytics = computeAnalytics(updated);
@@ -809,7 +892,7 @@ async function scanFactoryViaRPC(): Promise<void> {
         const currentPrice = priceFromBinId(activeBin, binStep, metaX.decimals, metaY.decimals);
         const existing = indexerStore.getPool(pairAddress);
         const baseFeePercent = binStep * 0.01;
-        const fallbackTvlUSD = estimateTvlFromUSDG(
+        const tvlEstimate = estimateTvlFromUSDG(
           tokenX,
           tokenY,
           metaX.decimals,
@@ -818,6 +901,7 @@ async function scanFactoryViaRPC(): Promise<void> {
           reserveY,
           currentPrice,
         );
+        const effectivePrice = currentPrice || tvlEstimate.priceXInY || null;
 
         const pool: IndexedPool = {
           address: pairAddress,
@@ -832,13 +916,13 @@ async function scanFactoryViaRPC(): Promise<void> {
           pair: `${metaX.symbol}/${metaY.symbol}`,
           binStep,
           activeBin,
-          currentPrice,
+          currentPrice: effectivePrice,
           fee: baseFeePercent,
           reserveX,
           reserveY,
-          // Use subgraph TVL when available; otherwise use the conservative
-          // USDG-backed estimate for stablecoin quote pools only.
-          tvl: fallbackTvlUSD ?? existing?.tvl ?? null,
+          // Factory/RPC discovery has no subgraph TVL in this path, so use the
+          // live USDG reserve valuation when possible.
+          tvl: tvlEstimate.tvl ?? existing?.tvl ?? null,
           volume1m: existing?.volume1m ?? 0,
           volume5m: existing?.volume5m ?? 0,
           volume15m: existing?.volume15m ?? 0,
