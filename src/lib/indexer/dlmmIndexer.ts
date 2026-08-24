@@ -26,16 +26,16 @@ const WETH_ADDRESS = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73';
 const USDG_ADDRESS = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
 
 // Ramses DLMM Factory ABI fragments (minimal, for eth_call)
-const FACTORY_ABI_GET_ALL_LB_PAIRS = '0x' + 'a0c7de0f'; // getAllLBPairs(tokenX, tokenY)
-const FACTORY_ABI_GET_NUMBER_OF_LB_PAIRS = '0x' + '5b8e5e6e'; // getNumberOfLBPairs()
+const FACTORY_GET_NUMBER_OF_LB_PAIRS = '0x4e937c3a'; // getNumberOfLBPairs()
+const FACTORY_GET_LB_PAIR_AT_INDEX = '0x7daf5d66'; // getLBPairAtIndex(uint256)
 
 // LBPair ABI selectors (for eth_call)
-const LBPAIR_GET_ACTIVE_ID = '0xd0c27c4f';       // getActiveId() returns (uint24)
+const LBPAIR_GET_ACTIVE_ID = '0xdbe65edc';       // getActiveId() returns (uint24)
 const LBPAIR_GET_RESERVES = '0x0902f1ac';         // getReserves() returns (uint128, uint128)
-const LBPAIR_GET_STATIC_FEE = '0x4b8a3529';       // getStaticFeeParameters()
-const LBPAIR_TOKEN_X = '0x4f5dce83';              // getTokenX() returns (address)
-const LBPAIR_TOKEN_Y = '0x273a8a2e';              // getTokenY() returns (address)
-const LBPAIR_BIN_STEP = '0x6a1db1bf';             // getBinStep() returns (uint16)
+const LBPAIR_GET_STATIC_FEE = '0x7ca0de30';       // getStaticFeeParameters()
+const LBPAIR_TOKEN_X = '0x05e8746d';              // getTokenX() returns (address)
+const LBPAIR_TOKEN_Y = '0xda10610c';              // getTokenY() returns (address)
+const LBPAIR_BIN_STEP = '0x17f11ecc';             // getBinStep() returns (uint16)
 
 // ERC20 ABI selectors
 const ERC20_SYMBOL = '0x95d89b41';
@@ -631,14 +631,125 @@ async function syncRecentSwaps(): Promise<void> {
   }
 }
 
-// Fallback: scan factory via direct RPC when subgraph is unavailable
+// Fallback: discover every LBPair directly from the Ramses DLMM factory.
+// The factory exposes an indexed array through getNumberOfLBPairs() and
+// getLBPairAtIndex(uint256), so this does not depend on a subgraph.
 async function scanFactoryViaRPC(): Promise<void> {
-  // This is a best-effort fallback. Without the subgraph we can only
-  // check known pools or scan logs for LBPairCreated events.
-  // For now, we mark the indexer as running but with no pools discovered.
-  // The subgraph is the primary data source.
+  const countHex = await ethCall(FACTORY_ADDRESS, FACTORY_GET_NUMBER_OF_LB_PAIRS);
+  const count = Number(decodeUint256(countHex));
+
+  if (!Number.isFinite(count) || count <= 0) {
+    indexerStore.setState({
+      poolsDiscovered: 0,
+      error: 'Ramses DLMM factory returned zero LB pairs.',
+    });
+    return;
+  }
+
+  // Keep RPC load reasonable on a serverless deployment.
+  const maxPairs = Math.min(count, Number(process.env.DLMM_MAX_POOLS || 200));
+  const concurrency = 5;
+
+  for (let start = 0; start < maxPairs; start += concurrency) {
+    const indices = Array.from(
+      { length: Math.min(concurrency, maxPairs - start) },
+      (_, offset) => start + offset
+    );
+
+    await Promise.allSettled(indices.map(async (index) => {
+      try {
+        const pairHex = await ethCall(
+          FACTORY_ADDRESS,
+          FACTORY_GET_LB_PAIR_AT_INDEX + BigInt(index).toString(16).padStart(64, '0')
+        );
+        const pairAddress = decodeAddress(pairHex);
+        if (/^0x0+$/.test(pairAddress) || pairAddress.length !== 42) return;
+
+        const [tokenXHex, tokenYHex, binStepHex, activeIdHex, reservesHex] = await Promise.all([
+          ethCall(pairAddress, LBPAIR_TOKEN_X),
+          ethCall(pairAddress, LBPAIR_TOKEN_Y),
+          ethCall(pairAddress, LBPAIR_BIN_STEP),
+          ethCall(pairAddress, LBPAIR_GET_ACTIVE_ID),
+          ethCall(pairAddress, LBPAIR_GET_RESERVES),
+        ]);
+
+        const tokenX = decodeAddress(tokenXHex);
+        const tokenY = decodeAddress(tokenYHex);
+        const binStep = decodeUint16(binStepHex);
+        const activeBin = decodeUint24(activeIdHex);
+        const cleanReserves = reservesHex.startsWith('0x') ? reservesHex.slice(2) : reservesHex;
+        const reserveX = cleanReserves.length >= 128
+          ? BigInt('0x' + cleanReserves.slice(0, 64)).toString()
+          : '0';
+        const reserveY = cleanReserves.length >= 128
+          ? BigInt('0x' + cleanReserves.slice(64, 128)).toString()
+          : '0';
+
+        const [metaX, metaY] = await Promise.all([
+          getTokenMetadata(tokenX),
+          getTokenMetadata(tokenY),
+        ]);
+
+        const currentPrice = priceFromBinId(activeBin, binStep);
+        const existing = indexerStore.getPool(pairAddress);
+        const baseFeePercent = binStep * 0.01;
+
+        const pool: IndexedPool = {
+          address: pairAddress,
+          protocol: 'Ramses DLMM',
+          pid: index,
+          tokenA: tokenX,
+          tokenB: tokenY,
+          symbolA: metaX.symbol,
+          symbolB: metaY.symbol,
+          decimalsA: metaX.decimals,
+          decimalsB: metaY.decimals,
+          pair: `${metaX.symbol}/${metaY.symbol}`,
+          binStep,
+          activeBin,
+          currentPrice,
+          fee: baseFeePercent,
+          reserveX,
+          reserveY,
+          // Do not invent a USD valuation when no independent price is available.
+          tvl: existing?.tvl ?? null,
+          volume1m: existing?.volume1m ?? 0,
+          volume5m: existing?.volume5m ?? 0,
+          volume15m: existing?.volume15m ?? 0,
+          volume1h: existing?.volume1h ?? 0,
+          volume6h: existing?.volume6h ?? 0,
+          volume24h: existing?.volume24h ?? 0,
+          volumeUSD1h: existing?.volumeUSD1h ?? null,
+          volumeUSD6h: existing?.volumeUSD6h ?? null,
+          volumeUSD24h: existing?.volumeUSD24h ?? null,
+          volumeToTVL: existing?.volumeToTVL ?? 0,
+          volatility: binStep * 0.5,
+          analyticsScore: 55,
+          riskLevel: binStep >= 20 ? 'HIGH' : binStep >= 10 ? 'MEDIUM' : 'LOW',
+          estimatedAPR: existing?.estimatedAPR ?? null,
+          priceChange24h: existing?.currentPrice && currentPrice
+            ? ((currentPrice - existing.currentPrice) / existing.currentPrice) * 100
+            : null,
+          timeInRange: existing?.timeInRange ?? null,
+          swapCount24h: existing?.swapCount24h ?? 0,
+          swapCount1h: existing?.swapCount1h ?? 0,
+          status: 'active',
+          createdBlock: existing?.createdBlock ?? 0,
+          createdTimestamp: existing?.createdTimestamp ?? 0,
+          updatedAt: Date.now(),
+        };
+
+        Object.assign(pool, computeAnalytics(pool));
+        indexerStore.upsertPool(pool);
+      } catch {
+        // A malformed/stale pair should not prevent discovery of the remaining pools.
+      }
+    }));
+  }
+
   indexerStore.setState({
-    error: 'Subgraph unavailable. Waiting for subgraph to come online.',
+    poolsDiscovered: indexerStore.getAllPools().length,
+    error: null,
   });
 }
 
