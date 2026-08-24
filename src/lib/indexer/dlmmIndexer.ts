@@ -1,5 +1,5 @@
 /**
- * Ramses DLMM Indexer V15 — Robinhood Chain (4663)
+ * Ramses DLMM Indexer V16 — Robinhood Chain (4663)
  *
  * Design goals:
  *  - Fast warm requests: discovery, RPC enrichment and volume refresh are cached.
@@ -52,7 +52,7 @@ const SWAP_PAGE_SIZE = Math.min(1000, Math.max(100, Number(process.env.DLMM_SWAP
 const SWAP_MAX_PAGES = Math.min(12, Math.max(1, Number(process.env.DLMM_SWAP_MAX_PAGES || 8)));
 const SWAP_REFRESH_POOLS = Math.max(1, Number(process.env.DLMM_SWAP_REFRESH_POOLS || 12));
 const GLOBAL_SWAP_LIMIT = Math.min(2000, Math.max(100, Number(process.env.DLMM_GLOBAL_SWAP_LIMIT || 1000)));
-const GLOBAL_SWAP_MAX_PAGES = Math.min(20, Math.max(1, Number(process.env.DLMM_GLOBAL_SWAP_MAX_PAGES || 12)));
+const GLOBAL_SWAP_MAX_PAGES = Math.min(100, Math.max(1, Number(process.env.DLMM_GLOBAL_SWAP_MAX_PAGES || 50)));
 const VOLUME_FALLBACK_POOL_LIMIT = Math.min(25, Math.max(3, Number(process.env.DLMM_VOLUME_FALLBACK_POOLS || 12)));
 
 let indexerRunning = false;
@@ -188,6 +188,12 @@ interface SubgraphSwap {
   amountOut?: string | null;
   amountUSD?: string | null;
   activeBinId?: number | null;
+  tokenX?: string | null;
+  tokenY?: string | null;
+  amountXIn?: string | null;
+  amountXOut?: string | null;
+  amountYIn?: string | null;
+  amountYOut?: string | null;
   [key: string]: unknown;
 }
 
@@ -477,16 +483,20 @@ async function getDLMMSwapFields(): Promise<Set<string>> {
   const query = `
     query IntrospectDLMMSwap {
       __type(name: "DLMMSwap") {
-        fields { name }
+        fields {
+          name
+          type { name kind ofType { name kind ofType { name kind } } }
+        }
       }
     }
   `;
   try {
-    const data = await subgraphQuery(query) as { __type?: { fields?: Array<{ name: string }> } | null };
-    const fields = new Set((data.__type?.fields ?? []).map(f => f.name));
+    const data = await subgraphQuery(query) as { __type?: { fields?: Array<{ name: string; type?: unknown }> } | null };
+    const fieldRows = data.__type?.fields ?? [];
+    const fields = new Set(fieldRows.map(f => f.name));
     if (!fields.size) throw new Error('Subgraph introspection returned no DLMMSwap fields');
     dlmmSwapFieldsCache = fields;
-    console.log('[DLMM V15] DLMMSwap schema:', Array.from(fields).sort());
+    console.log('[DLMM V16] DLMMSwap schema:', fieldRows.map(f => ({ name: f.name, type: f.type })).sort((a, b) => a.name.localeCompare(b.name)));
     return fields;
   } catch (err) {
     dlmmSwapIntrospectionError = err instanceof Error ? err.message : String(err);
@@ -494,7 +504,7 @@ async function getDLMMSwapFields(): Promise<Set<string>> {
     // established as part of this project's DLMMSwap payload. Keep the
     // fallback deliberately minimal; never guess tokenIn/tokenOut/blockNumber.
     dlmmSwapFieldsCache = new Set(['id', 'pool', 'transaction', 'timestamp', 'amountUSD']);
-    console.log('[DLMM V15] DLMMSwap introspection unavailable:', dlmmSwapIntrospectionError);
+    console.log('[DLMM V16] DLMMSwap introspection unavailable:', dlmmSwapIntrospectionError);
     return dlmmSwapFieldsCache;
   }
 }
@@ -517,6 +527,12 @@ function buildDLMMSwapSelection(fields: Set<string>): { selection: string; map: 
     amountIn: ['amountIn', 'inputAmount'],
     amountOut: ['amountOut', 'outputAmount'],
     blockNumber: ['blockNumber', 'createdAtBlockNumber'],
+    tokenX: ['tokenX'],
+    tokenY: ['tokenY'],
+    amountXIn: ['amountXIn'],
+    amountXOut: ['amountXOut'],
+    amountYIn: ['amountYIn'],
+    amountYOut: ['amountYOut'],
   };
   const map: Record<string, string> = {};
   const selected: string[] = [];
@@ -532,20 +548,69 @@ function buildDLMMSwapSelection(fields: Set<string>): { selection: string; map: 
   return { selection: Array.from(new Set(selected)).join(' '), map };
 }
 
+function addressFromValue(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const id = obj.id ?? obj.address;
+    if (typeof id === 'string') return id;
+  }
+  return null;
+}
+
 function normalizeSwapRow(row: Record<string, unknown>, map: Record<string, string>): SubgraphSwap {
   const get = (logical: string) => map[logical] ? row[map[logical]] : undefined;
+  const tokenX = addressFromValue(get('tokenX'));
+  const tokenY = addressFromValue(get('tokenY'));
+  const directTokenIn = addressFromValue(get('tokenIn'));
+  const directTokenOut = addressFromValue(get('tokenOut'));
+
+  const xIn = get('amountXIn') == null ? null : String(get('amountXIn'));
+  const xOut = get('amountXOut') == null ? null : String(get('amountXOut'));
+  const yIn = get('amountYIn') == null ? null : String(get('amountYIn'));
+  const yOut = get('amountYOut') == null ? null : String(get('amountYOut'));
+
+  // Robinhood/Kingdom uses amountXIn/XOut and amountYIn/YOut rather than
+  // tokenIn/tokenOut + amountIn/amountOut. Derive the normalized direction
+  // from the non-zero input/output legs when the direct fields are absent.
+  const xInN = Number(xIn ?? 0);
+  const yInN = Number(yIn ?? 0);
+  const xOutN = Number(xOut ?? 0);
+  const yOutN = Number(yOut ?? 0);
+
+  let tokenIn = directTokenIn;
+  let tokenOut = directTokenOut;
+  let amountIn = get('amountIn') == null ? null : String(get('amountIn'));
+  let amountOut = get('amountOut') == null ? null : String(get('amountOut'));
+
+  if (!tokenIn) {
+    if (xInN > 0 && tokenX) { tokenIn = tokenX; amountIn = xIn; }
+    else if (yInN > 0 && tokenY) { tokenIn = tokenY; amountIn = yIn; }
+  }
+  if (!tokenOut) {
+    if (yOutN > 0 && tokenY) { tokenOut = tokenY; amountOut = yOut; }
+    else if (xOutN > 0 && tokenX) { tokenOut = tokenX; amountOut = xOut; }
+  }
+
   return {
     id: String(get('id') ?? ''),
     pool: String(get('pool') ?? ''),
     transaction: get('transaction') == null ? null : String(get('transaction')),
     timestamp: Number(get('timestamp') ?? 0),
     blockNumber: get('blockNumber') == null ? 0 : Number(get('blockNumber')),
-    tokenIn: get('tokenIn') == null ? null : String(get('tokenIn')),
-    tokenOut: get('tokenOut') == null ? null : String(get('tokenOut')),
-    amountIn: get('amountIn') == null ? null : String(get('amountIn')),
-    amountOut: get('amountOut') == null ? null : String(get('amountOut')),
+    tokenIn,
+    tokenOut,
+    amountIn,
+    amountOut,
     amountUSD: get('amountUSD') == null ? null : String(get('amountUSD')),
     activeBinId: get('activeBinId') == null ? null : Number(get('activeBinId')),
+    tokenX,
+    tokenY,
+    amountXIn: xIn,
+    amountXOut: xOut,
+    amountYIn: yIn,
+    amountYOut: yOut,
   };
 }
 
@@ -571,16 +636,28 @@ async function fetchRecentSwapsForPool(poolId: string, limit = 100): Promise<Sub
 }
 
 async function fetchRecentSwapsGlobalFiltered(cutoffSeconds: number): Promise<SubgraphSwap[]> {
+  const all: SubgraphSwap[] = [];
   const query = `
-    query GetRecentSwaps($since: Int!, $chainId: Int!, $limit: Int!) {
+    query GetRecentSwaps($since: String!, $chainId: Int!, $limit: Int!, $offset: Int!) {
       DLMMSwap(
         where: { chainId: { _eq: $chainId }, timestamp: { _gte: $since } }
         limit: $limit
+        offset: $offset
         order_by: { timestamp: desc }
       ) { __DLMM_SWAP_SELECTION__ }
     }
   `;
-  return fetchDLMMSwaps({ since: cutoffSeconds, chainId: CHAIN_ID, limit: GLOBAL_SWAP_LIMIT }, query);
+
+  for (let page = 0; page < GLOBAL_SWAP_MAX_PAGES; page++) {
+    const rows = await fetchDLMMSwaps(
+      { since: String(cutoffSeconds), chainId: CHAIN_ID, limit: SWAP_PAGE_SIZE, offset: page * SWAP_PAGE_SIZE },
+      query,
+    );
+    all.push(...rows);
+    if (rows.length < SWAP_PAGE_SIZE) return all.filter(s => safeTimestampSeconds(s.timestamp) >= cutoffSeconds);
+  }
+
+  return all.filter(s => safeTimestampSeconds(s.timestamp) >= cutoffSeconds);
 }
 
 async function fetchRecentSwapsGlobalPaged(cutoffSeconds: number): Promise<SubgraphSwap[]> {
@@ -850,7 +927,7 @@ async function refreshPoolVolumes(): Promise<void> {
 
     if (indexedSwapKeys.size > 25_000) indexedSwapKeys.clear();
 
-    console.log('[DLMM V15] volume refresh:', {
+    console.log('[DLMM V16] volume refresh:', {
       selected: all.length,
       success,
       failed,
@@ -912,7 +989,7 @@ async function refreshPoolVolumes(): Promise<void> {
     }
   });
 
-  console.log('[DLMM V15] volume refresh:', {
+  console.log('[DLMM V16] volume refresh:', {
     selected: selected.length,
     success,
     failed,
