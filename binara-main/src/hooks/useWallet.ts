@@ -1,9 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useSyncExternalStore } from 'react';
 
 export const ROBINHOOD_CHAIN_ID = 4663;
-export const ROBINHOOD_CHAIN_HEX = '0x' + ROBINHOOD_CHAIN_ID.toString(16); // 0x1237
+export const ROBINHOOD_CHAIN_HEX = '0x' + ROBINHOOD_CHAIN_ID.toString(16);
 const WALLET_CHANGED_EVENT = 'binara:wallet-changed';
 
 export interface TokenBalance {
@@ -79,20 +79,34 @@ const EMPTY_WALLET_STATE: WalletState = {
   error: null,
 };
 
-// useWallet is consumed by both the global Topbar and page-level screens.
-// Keep one in-memory snapshot so navigation does not reset a page-level hook
-// to "disconnected" while the shared wallet is already connected.
+// Wallet state is a small external store so persistent Next.js layouts and
+// route pages always observe the exact same snapshot. useSyncExternalStore
+// is important here: a custom event alone can leave a persistent page with a
+// stale render until the route is revisited.
 let sharedWalletState: WalletState = { ...EMPTY_WALLET_STATE };
-const walletSubscribers = new Set<(state: WalletState) => void>();
+const walletSubscribers = new Set<() => void>();
+
+function subscribeWallet(callback: () => void) {
+  walletSubscribers.add(callback);
+  return () => walletSubscribers.delete(callback);
+}
+
+function getWalletSnapshot() {
+  return sharedWalletState;
+}
+
+function getServerWalletSnapshot() {
+  return EMPTY_WALLET_STATE;
+}
 
 function updateSharedWalletState(patch: Partial<WalletState>) {
   sharedWalletState = { ...sharedWalletState, ...patch };
-  walletSubscribers.forEach((subscriber) => subscriber(sharedWalletState));
+  walletSubscribers.forEach((subscriber) => subscriber());
 }
 
 function resetSharedWalletState() {
   sharedWalletState = { ...EMPTY_WALLET_STATE };
-  walletSubscribers.forEach((subscriber) => subscriber(sharedWalletState));
+  walletSubscribers.forEach((subscriber) => subscriber());
 }
 
 export function useWallet(): WalletState & {
@@ -100,11 +114,7 @@ export function useWallet(): WalletState & {
   disconnect: () => void;
   switchToRobinhoodChain: () => Promise<void>;
 } {
-  const [state, setState] = useState<WalletState>(() => ({ ...sharedWalletState }));
-
-  const setPartial = useCallback((partial: Partial<WalletState>) => {
-    updateSharedWalletState(partial);
-  }, []);
+  const state = useSyncExternalStore(subscribeWallet, getWalletSnapshot, getServerWalletSnapshot);
 
   const notifyWalletChanged = useCallback(() => {
     if (typeof window !== 'undefined') {
@@ -153,7 +163,7 @@ export function useWallet(): WalletState & {
         return;
       }
 
-      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' }) as string;
+      const chainIdHex = (await window.ethereum.request({ method: 'eth_chainId' })) as string;
       const id = parseInt(chainIdHex, 16);
       const account = accounts[0];
       updateSharedWalletState({
@@ -193,13 +203,7 @@ export function useWallet(): WalletState & {
   );
 
   useEffect(() => {
-    const onSharedState = (nextState: WalletState) => setState({ ...nextState });
-    walletSubscribers.add(onSharedState);
-    setState({ ...sharedWalletState });
-
-    if (typeof window === 'undefined' || !window.ethereum) {
-      return () => walletSubscribers.delete(onSharedState);
-    }
+    if (typeof window === 'undefined' || !window.ethereum) return;
 
     syncProviderState();
     window.ethereum.on('accountsChanged', handleAccountsChanged);
@@ -212,16 +216,15 @@ export function useWallet(): WalletState & {
       window.ethereum?.removeListener('accountsChanged', handleAccountsChanged);
       window.ethereum?.removeListener('chainChanged', handleChainChanged);
       window.removeEventListener(WALLET_CHANGED_EVENT, onBinaraWalletChanged);
-      walletSubscribers.delete(onSharedState);
     };
   }, [handleAccountsChanged, handleChainChanged, syncProviderState]);
 
   const connect = useCallback(async () => {
     if (!window.ethereum) {
-      setPartial({ error: 'No wallet detected. Please install MetaMask or Rabby.' });
+      updateSharedWalletState({ error: 'No wallet detected. Please install MetaMask or Rabby.' });
       return;
     }
-    setPartial({ isConnecting: true, error: null });
+    updateSharedWalletState({ isConnecting: true, error: null });
     try {
       const accounts = (await window.ethereum.request({ method: 'eth_requestAccounts' })) as string[];
       const chainIdHex = (await window.ethereum.request({ method: 'eth_chainId' })) as string;
@@ -238,9 +241,9 @@ export function useWallet(): WalletState & {
       await loadBalances(account);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Connection failed';
-      setPartial({ isConnecting: false, error: msg });
+      updateSharedWalletState({ isConnecting: false, error: msg });
     }
-  }, [loadBalances, notifyWalletChanged, setPartial]);
+  }, [loadBalances, notifyWalletChanged]);
 
   const disconnect = useCallback(() => {
     resetSharedWalletState();
@@ -249,7 +252,7 @@ export function useWallet(): WalletState & {
 
   const switchToRobinhoodChain = useCallback(async () => {
     if (!window.ethereum) return;
-    setPartial({ isSwitchingChain: true });
+    updateSharedWalletState({ isSwitchingChain: true });
     try {
       await window.ethereum.request({
         method: 'wallet_switchEthereumChain',
@@ -274,13 +277,13 @@ export function useWallet(): WalletState & {
           notifyWalletChanged();
         } catch (addError: unknown) {
           const msg = addError instanceof Error ? addError.message : 'Failed to add chain';
-          setPartial({ error: msg });
+          updateSharedWalletState({ error: msg });
         }
       }
     } finally {
-      setPartial({ isSwitchingChain: false });
+      updateSharedWalletState({ isSwitchingChain: false });
     }
-  }, [notifyWalletChanged, setPartial, syncProviderState]);
+  }, [notifyWalletChanged, syncProviderState]);
 
   return { ...state, connect, disconnect, switchToRobinhoodChain };
 }
