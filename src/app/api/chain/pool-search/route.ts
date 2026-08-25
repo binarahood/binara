@@ -54,12 +54,10 @@ export async function GET(request: Request) {
       resultMap.set(address, { id: pool.id, address, pair: `${tokenA}/${tokenB}`, tokenA, tokenB, tokenAName: pool.baseTokenName || resolveTokenName(pool.baseTokenAddress || '', geckoMetadata), tokenBName: pool.quoteTokenName || resolveTokenName(pool.quoteTokenAddress || '', geckoMetadata), tokenAAddress: pool.baseTokenAddress, tokenBAddress: pool.quoteTokenAddress, currentPrice: marketData?.baseTokenPriceUsd ?? pool.priceUsd, priceChange24h: marketData?.priceChange24h ?? pool.priceChange24h, tvl, volume24h, volumeToTVL: tvl && tvl > 0 && volume24h != null ? volume24h / tvl : null, protocol: 'Robinhood DLMM', status: 'active', discoverySource: 'geckoterminal-search', gmgn: pool.baseTokenAddress ? gmgn.byToken.get(pool.baseTokenAddress) ?? null : null });
     }
 
-    const results = Array.from(resultMap.values()).filter((pool) => {
-      const tvl = typeof pool.tvl === 'number' ? pool.tvl : null;
-      return tvl === null || tvl > 0;
-    }).slice(0, MAX_RESULTS);
-
-    return NextResponse.json({ status: 'live', query, results, discovery: { source: geckoResults.length ? 'geckoterminal+robinhood' : 'robinhood-index', searched: true, indexedPools: indexed.length, geckoResults: geckoResults.length, gmgnTokensReturned: gmgn.tokensReturned, marketPoolsReturned: market.poolsReturned, note: 'Search can surface pools hidden from the main scanner. Zero-liquidity and unresolved pools are excluded from search results only when their TVL is explicitly zero; unresolved TVL remains searchable.' } });
+    // Search is intentionally more permissive than the main scanner: a pool
+    // with TVL 0 or unresolved TVL should still be discoverable by address/name.
+    const results = Array.from(resultMap.values()).slice(0, MAX_RESULTS);
+    return NextResponse.json({ status: 'live', query, results, discovery: { source: geckoResults.length ? 'geckoterminal+robinhood' : 'robinhood-index', searched: true, indexedPools: indexed.length, geckoResults: geckoResults.length, gmgnTokensReturned: gmgn.tokensReturned, marketPoolsReturned: market.poolsReturned, marketBatchesSucceeded: market.batchesSucceeded, marketBatchesAttempted: market.batchesAttempted, note: 'Main scanner hides zero/unresolved liquidity. On-demand search keeps those pools discoverable so users can open and investigate them.' } });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Pool discovery failed';
     return NextResponse.json({ status: 'error', query, results: [], error: message }, { status: 503 });
