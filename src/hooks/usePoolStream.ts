@@ -97,12 +97,15 @@ export function useSinglePoolStream(poolAddress?: string) {
     setRouteAddress(address);
   }, [poolAddress]);
 
+  // Pool detail must be tied to the requested address. Never silently fall back
+  // to the first scanner row because that can display the wrong pool.
   const pool = routeAddress
-    ? pools.find((p: LivePool) => p.address.toLowerCase() === routeAddress.toLowerCase())
-    : pools[0];
+    ? pools.find((candidate: LivePool) => candidate.address?.toLowerCase() === routeAddress.toLowerCase())
+    : undefined;
 
   return {
     pool: pool ?? null,
+    routeAddress: routeAddress ?? null,
     streamStatus,
     isLoading,
     error,
