@@ -179,9 +179,6 @@ export async function GET() {
       };
     });
 
-    const tvlFromSubgraph = pools.filter((pool) => pool.tvl !== null && pool.tvl === Number(pool.totalValueLockedUSD ?? NaN)).length;
-    const tvlFromMarket = pools.filter((pool) => pool.tvl !== null && Number(pool.totalValueLockedUSD ?? 0) <= 0).length;
-
     return NextResponse.json({
       apiVersion: API_VERSION,
       status: 'live',
@@ -199,8 +196,6 @@ export async function GET() {
         poolsWithMarketData: market.poolsReturned,
         poolsWithResolvedTokenSymbols: pools.filter((pool) => pool.tokenA !== null && pool.tokenB !== null).length,
         tvlResolved: pools.filter((pool) => pool.tvl !== null).length,
-        tvlFromSubgraph,
-        tvlFallbackEligible: tvlFromMarket,
         note: 'Token symbols are resolved from live on-chain ERC-20 metadata when the subgraph symbol is missing. Zero/missing subgraph TVL uses verified market reserve USD when available.',
       },
       indexer: {
