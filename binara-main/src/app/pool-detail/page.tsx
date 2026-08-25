@@ -11,7 +11,7 @@ import RiskPanel from './components/RiskPanel';
 import ScenarioTable from './components/ScenarioTable';
 import StrategySelector from './components/StrategySelector';
 import { useSinglePoolStream } from '@/hooks/usePoolStream';
-import { fmtUSD, fmtPrice } from '@/lib/liveTypes';
+import { LivePool, fmtUSD, fmtPrice } from '@/lib/liveTypes';
 
 const PriceChart = dynamic(() => import('./components/PriceChart'), { ssr: false });
 const LiquidityDistribution = dynamic(() => import('./components/LiquidityDistribution'), { ssr: false });
@@ -25,8 +25,26 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: 'risk', label: 'Risk', icon: 'ExclamationTriangleIcon' },
 ];
 
+const KNOWN_TOKEN_NAMES: Record<string, string> = {
+  '0x6245e67affa44a23077f0ea7f981a8dc743a0c47': 'FRONG',
+  '0x0bd7d308f8e1639fab988df18a8011f41eacad73': 'WETH',
+  '0x5fc5360d0400a0fd4f2af552add042d716f1d168': 'USDG',
+};
+
 function metric(value: number | null, suffix = ''): string {
   return value === null || !Number.isFinite(value) ? 'N/A' : `${value.toLocaleString()}${suffix}`;
+}
+
+function tokenDisplay(address: string | null | undefined, fallback: string | null | undefined) {
+  if (address) return KNOWN_TOKEN_NAMES[address.toLowerCase()] || fallback || `${address.slice(0, 6)}…${address.slice(-4)}`;
+  return fallback || 'N/A';
+}
+
+function poolDisplayName(pool: LivePool | null) {
+  if (!pool) return 'N/A';
+  const a = tokenDisplay(pool.tokenAAddress, pool.tokenAName || pool.tokenA);
+  const b = tokenDisplay(pool.tokenBAddress, pool.tokenBName || pool.tokenB);
+  return a && b ? `${a} / ${b}` : pool.pair || 'N/A';
 }
 
 export default function PoolDetailPage() {
@@ -39,6 +57,7 @@ export default function PoolDetailPage() {
   const [upperRange, setUpperRange] = useState(0);
 
   const currentPrice = pool?.currentPrice ?? 0;
+  const displayName = poolDisplayName(pool);
   const hasSimulationInputs = !!pool && currentPrice > 0 && pool.tvl !== null && pool.volume24h !== null && pool.fee !== null;
 
   useEffect(() => {
@@ -66,8 +85,8 @@ export default function PoolDetailPage() {
     <div className="space-y-5 animate-fade-in">
       <div className="flex items-start justify-between flex-wrap gap-4">
         <div className="flex items-center gap-4">
-          <div className="flex -space-x-3"><div className="w-12 h-12 rounded-full bg-primary/20 border-2 border-card flex items-center justify-center text-lg font-bold text-primary z-10">{pool?.tokenA?.[0] || '?'}</div><div className="w-12 h-12 rounded-full bg-accent/20 border-2 border-card flex items-center justify-center text-lg font-bold text-accent">{pool?.tokenB?.[0] || '?'}</div></div>
-          <div><div className="flex items-center gap-2 mb-1"><h1 className="text-2xl font-bold text-foreground">{isLoading ? 'Loading…' : pool?.pair || 'N/A'}</h1>{pool && <FeeBadge fee={pool.fee} />}{pool && <RiskBadge level={pool.riskLevel} />}{pool && <StatusBadge status={pool.status} />}</div><div className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono-nums"><Icon name="CubeIcon" size={11} /><span>{pool ? `${pool.address.slice(0, 18)}...${pool.address.slice(-6)}` : poolAddress ? `${poolAddress.slice(0, 18)}...${poolAddress.slice(-6)}` : 'Pool address unavailable'}</span></div></div>
+          <div className="flex -space-x-3"><div className="w-12 h-12 rounded-full bg-primary/20 border-2 border-card flex items-center justify-center text-lg font-bold text-primary z-10">{tokenDisplay(pool?.tokenAAddress, pool?.tokenA)?.[0] || '?'}</div><div className="w-12 h-12 rounded-full bg-accent/20 border-2 border-card flex items-center justify-center text-lg font-bold text-accent">{tokenDisplay(pool?.tokenBAddress, pool?.tokenB)?.[0] || '?'}</div></div>
+          <div><div className="flex items-center gap-2 mb-1"><h1 className="text-2xl font-bold text-foreground">{isLoading ? 'Loading…' : displayName}</h1>{pool && <FeeBadge fee={pool.fee} />}{pool && <RiskBadge level={pool.riskLevel} />}{pool && <StatusBadge status={pool.status} />}</div><div className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono-nums"><Icon name="CubeIcon" size={11} /><span>{pool ? `${pool.address.slice(0, 18)}...${pool.address.slice(-6)}` : poolAddress ? `${poolAddress.slice(0, 18)}...${poolAddress.slice(-6)}` : 'Pool address unavailable'}</span></div></div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {isLoading ? <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-muted/40 border border-border"><div className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse" /><span className="text-xs text-muted-foreground font-semibold">CONNECTING</span></div> : error ? <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-destructive/10 border border-destructive"><div className="w-2 h-2 rounded-full bg-destructive" /><span className="text-xs text-destructive font-semibold">DATA ERROR</span></div> : streamStatus.status === 'stale' ? <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-warning-subtle border border-warning/30"><div className="w-2 h-2 rounded-full bg-warning" /><span className="text-xs text-warning font-semibold">STALE DATA</span></div> : hasRealPoolData ? <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-positive-subtle border border-positive/30"><div className="live-dot" /><span className="text-xs text-positive font-semibold">LIVE{secondsAgo !== null ? ` • ${secondsAgo}s ago` : ''}</span></div> : <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-warning-subtle border border-warning/30"><div className="w-2 h-2 rounded-full bg-warning animate-pulse" /><span className="text-xs text-warning font-semibold">INDEXING</span></div>}
@@ -90,7 +109,7 @@ export default function PoolDetailPage() {
           <div className="xl:col-span-2 space-y-4">
             <div className="flex items-center gap-1 border-b border-border overflow-x-auto">{TABS.map((tab) => <button suppressHydrationWarning key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-1.5 px-3 py-2.5 text-sm font-medium border-b-2 transition-all -mb-px whitespace-nowrap ${activeTab === tab.id ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'}`}><Icon name={tab.icon as Parameters<typeof Icon>[0]['name']} size={14} />{tab.label}</button>)}</div>
             <div className="rounded-xl border border-border bg-card p-4 card-hover">
-              {activeTab === 'overview' && <div className="animate-fade-in">{currentPrice > 0 ? <><div className="flex items-center justify-between mb-3"><h2 className="text-sm font-semibold text-foreground">{pool.pair} Price</h2><span className="text-xs text-muted-foreground font-mono-nums">LP Range: {fmtPrice(lowerRange)} — {fmtPrice(upperRange)}</span></div><PriceChart currentPrice={currentPrice} lowerRange={lowerRange} upperRange={upperRange} /></> : <Unavailable title="Price chart unavailable" detail="Verified current price data is not available for this pool." />}</div>}
+              {activeTab === 'overview' && <div className="animate-fade-in">{currentPrice > 0 ? <><div className="flex items-center justify-between mb-3"><h2 className="text-sm font-semibold text-foreground">{displayName} Price</h2><span className="text-xs text-muted-foreground font-mono-nums">LP Range: {fmtPrice(lowerRange)} — {fmtPrice(upperRange)}</span></div><PriceChart currentPrice={currentPrice} lowerRange={lowerRange} upperRange={upperRange} /></> : <Unavailable title="Price chart unavailable" detail="Verified current price data is not available for this pool." />}</div>}
               {activeTab === 'liquidity' && <div className="animate-fade-in"><div className="flex items-center justify-between mb-3"><h2 className="text-sm font-semibold text-foreground">DLMM Liquidity Distribution</h2><span className="text-xs text-muted-foreground font-mono-nums">Bin step: {metric(pool.binStep)}{pool.activeBin !== null ? ` · Active bin: ${pool.activeBin}` : ''}</span></div><LiquidityDistribution lowerRange={lowerRange} upperRange={upperRange} poolAddress={pool.address} activeBin={pool.activeBin} binStep={pool.binStep ?? 5} /></div>}
               {activeTab === 'simulate' && <div className="animate-fade-in space-y-4"><div className="flex items-center justify-between"><h2 className="text-sm font-semibold text-foreground">Range Simulator</h2><span className="px-2 py-0.5 rounded text-xs font-semibold bg-warning-subtle text-warning border border-warning/30">SIMULATION</span></div>{hasSimulationInputs ? <ScenarioTable initialCapital={10000} currentPrice={currentPrice} lowerPrice={lowerRange} upperPrice={upperRange} feeEstimate={(pool.volume24h! * (pool.fee! / 100) * (10000 / Math.max(pool.tvl!, 1)))} /> : <Unavailable title="Simulator unavailable" detail="Current price, TVL, 24h volume and fee are all required for this simulation." />}</div>}
               {activeTab === 'fees' && <div className="animate-fade-in"><h2 className="text-sm font-semibold text-foreground mb-3">Fee Analytics</h2><FeeAnalytics estimatedAPR={pool.estimatedAPR} volume24h={pool.volume24h} fee={pool.fee} tvl={pool.tvl} activeLiquidity={null} /></div>}
