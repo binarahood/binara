@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import AppLayout from '@/components/AppLayout';
 import { RiskBadge, FeeBadge, StatusBadge } from '@/components/ui/Badge';
 import Icon from '@/components/ui/AppIcon';
@@ -10,7 +11,7 @@ import RiskPanel from './components/RiskPanel';
 import ScenarioTable from './components/ScenarioTable';
 import StrategySelector from './components/StrategySelector';
 import { useSinglePoolStream } from '@/hooks/usePoolStream';
-import { LivePool, fmtUSD, fmtPrice } from '@/lib/liveTypes';
+import { fmtUSD, fmtPrice } from '@/lib/liveTypes';
 
 const PriceChart = dynamic(() => import('./components/PriceChart'), { ssr: false });
 const LiquidityDistribution = dynamic(() => import('./components/LiquidityDistribution'), { ssr: false });
@@ -29,13 +30,21 @@ function metric(value: number | null, suffix = ''): string {
 }
 
 export default function PoolDetailPage() {
-  const { pool, isLoading, error, secondsAgo, streamStatus } = useSinglePoolStream();
+  const searchParams = useSearchParams();
+  const addressParam = searchParams.get('address');
+  const poolAddress = addressParam?.trim() || undefined;
+  const { pool, isLoading, error, secondsAgo, streamStatus } = useSinglePoolStream(poolAddress);
   const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [lowerRange, setLowerRange] = useState(0);
   const [upperRange, setUpperRange] = useState(0);
 
   const currentPrice = pool?.currentPrice ?? 0;
   const hasSimulationInputs = !!pool && currentPrice > 0 && pool.tvl !== null && pool.volume24h !== null && pool.fee !== null;
+
+  useEffect(() => {
+    setLowerRange(0);
+    setUpperRange(0);
+  }, [poolAddress]);
 
   useEffect(() => {
     if (currentPrice > 0 && lowerRange === 0) {
@@ -58,7 +67,7 @@ export default function PoolDetailPage() {
       <div className="flex items-start justify-between flex-wrap gap-4">
         <div className="flex items-center gap-4">
           <div className="flex -space-x-3"><div className="w-12 h-12 rounded-full bg-primary/20 border-2 border-card flex items-center justify-center text-lg font-bold text-primary z-10">{pool?.tokenA?.[0] || '?'}</div><div className="w-12 h-12 rounded-full bg-accent/20 border-2 border-card flex items-center justify-center text-lg font-bold text-accent">{pool?.tokenB?.[0] || '?'}</div></div>
-          <div><div className="flex items-center gap-2 mb-1"><h1 className="text-2xl font-bold text-foreground">{isLoading ? 'Loading…' : pool?.pair || 'N/A'}</h1>{pool && <FeeBadge fee={pool.fee} />}{pool && <RiskBadge level={pool.riskLevel} />}{pool && <StatusBadge status={pool.status} />}</div><div className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono-nums"><Icon name="CubeIcon" size={11} /><span>{pool ? `${pool.address.slice(0, 18)}...${pool.address.slice(-6)}` : 'Pool address unavailable'}</span></div></div>
+          <div><div className="flex items-center gap-2 mb-1"><h1 className="text-2xl font-bold text-foreground">{isLoading ? 'Loading…' : pool?.pair || 'N/A'}</h1>{pool && <FeeBadge fee={pool.fee} />}{pool && <RiskBadge level={pool.riskLevel} />}{pool && <StatusBadge status={pool.status} />}</div><div className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono-nums"><Icon name="CubeIcon" size={11} /><span>{pool ? `${pool.address.slice(0, 18)}...${pool.address.slice(-6)}` : poolAddress ? `${poolAddress.slice(0, 18)}...${poolAddress.slice(-6)}` : 'Pool address unavailable'}</span></div></div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {isLoading ? <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-muted/40 border border-border"><div className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse" /><span className="text-xs text-muted-foreground font-semibold">CONNECTING</span></div> : error ? <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-destructive/10 border border-destructive"><div className="w-2 h-2 rounded-full bg-destructive" /><span className="text-xs text-destructive font-semibold">DATA ERROR</span></div> : streamStatus.status === 'stale' ? <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-warning-subtle border border-warning/30"><div className="w-2 h-2 rounded-full bg-warning" /><span className="text-xs text-warning font-semibold">STALE DATA</span></div> : hasRealPoolData ? <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-positive-subtle border border-positive/30"><div className="live-dot" /><span className="text-xs text-positive font-semibold">LIVE{secondsAgo !== null ? ` • ${secondsAgo}s ago` : ''}</span></div> : <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-warning-subtle border border-warning/30"><div className="w-2 h-2 rounded-full bg-warning animate-pulse" /><span className="text-xs text-warning font-semibold">INDEXING</span></div>}
@@ -67,7 +76,7 @@ export default function PoolDetailPage() {
       </div>
 
       {error && <div className="rounded-xl border border-destructive/40 bg-destructive/10 p-4 flex items-start gap-3"><Icon name="ExclamationTriangleIcon" size={16} className="text-destructive flex-shrink-0 mt-0.5" /><div><p className="text-sm font-semibold text-destructive">DATA CONNECTION ERROR</p><p className="text-xs text-destructive/80 mt-0.5">Unable to retrieve live Robinhood Chain data. {error}</p></div></div>}
-      {!isLoading && !error && !pool && <div className="rounded-xl border border-border bg-card p-8 flex flex-col items-center gap-3"><Icon name="CircleStackIcon" size={32} className="text-muted-foreground/40" /><p className="text-sm font-semibold text-foreground">No pool data available</p><p className="text-xs text-muted-foreground text-center max-w-sm">Connected to Robinhood Chain, but this pool has no verified live record yet.</p></div>}
+      {!isLoading && !error && !pool && <div className="rounded-xl border border-border bg-card p-8 flex flex-col items-center gap-3"><Icon name="CircleStackIcon" size={32} className="text-muted-foreground/40" /><p className="text-sm font-semibold text-foreground">No pool data available</p><p className="text-xs text-muted-foreground text-center max-w-sm">{poolAddress ? 'This pool address was not returned by the verified live pool feed yet.' : 'Connected to Robinhood Chain, but no pool was selected.'}</p></div>}
 
       {pool && <>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">{[
