@@ -3,15 +3,11 @@ import React from 'react';
 type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME';
 type StatusType = 'in-range' | 'near-lower' | 'near-upper' | 'out-of-range' | 'active' | 'inactive';
 
-interface RiskBadgeProps {
-  level: RiskLevel;
-}
-
-interface StatusBadgeProps {
-  status: StatusType;
-}
+interface RiskBadgeProps { level: RiskLevel | null; }
+interface StatusBadgeProps { status: StatusType; }
 
 export function RiskBadge({ level }: RiskBadgeProps) {
+  if (!level) return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground border border-border">Risk N/A</span>;
   const classes: Record<RiskLevel, string> = {
     LOW: 'badge-risk-low',
     MEDIUM: 'badge-risk-medium',
@@ -31,22 +27,12 @@ export function StatusBadge({ status }: StatusBadgeProps) {
     'inactive': { label: 'Inactive', dot: 'bg-muted-foreground', cls: 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground' },
   };
   const c = config[status];
-  return (
-    <span className={c.cls}>
-      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
-      {c.label}
-    </span>
-  );
+  return <span className={c.cls}><span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />{c.label}</span>;
 }
 
-interface FeeBadgeProps {
-  fee: number;
-}
+interface FeeBadgeProps { fee: number | null; }
 
 export function FeeBadge({ fee }: FeeBadgeProps) {
-  return (
-    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono-nums font-semibold bg-info-subtle text-info border border-info/30">
-      {fee}%
-    </span>
-  );
+  if (fee === null || !Number.isFinite(fee)) return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono-nums font-semibold bg-muted text-muted-foreground border border-border">Fee N/A</span>;
+  return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono-nums font-semibold bg-info-subtle text-info border border-info/30">{fee}%</span>;
 }
