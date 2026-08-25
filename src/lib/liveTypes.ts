@@ -42,6 +42,24 @@ export interface LivePool {
   estimatedAPR: number | null;
   timeInRange: number | null;
 
+  // GMGN token intelligence (optional; requires GMGN_API_KEY)
+  gmgn: {
+    source: 'gmgn';
+    symbol: string | null;
+    name: string | null;
+    priceUsd: number | null;
+    liquidityUsd: number | null;
+    holderCount: number | null;
+    volume24h: number | null;
+    swaps24h: number | null;
+    smartWallets: number | null;
+    renownedWallets: number | null;
+    rugRatio: number | null;
+    washTrading: boolean | null;
+    biggestPoolAddress: string | null;
+    exchange: string | null;
+  } | null;
+
   // Activity
   swapCount24h: number | null;
   swapCount1h: number | null;
