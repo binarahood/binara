@@ -14,7 +14,9 @@ const DEFAULT_FILTERS: FilterState = {
   minVolume: 0,
   minVolToTVL: 0,
   maxVolatility: 25,
-  feeTiers: [0.05, 0.1, 0.3, 1.0],
+  // Empty means "all fees". This prevents the scanner from hiding real
+  // Robinhood pools just because their binStep is not one of the old presets.
+  feeTiers: [],
   riskLevels: ['LOW', 'MEDIUM', 'HIGH', 'EXTREME'],
   minScore: 0,
   minSwaps: 0,
@@ -25,7 +27,7 @@ export default function PoolScannerPage() {
   const [selectedPool, setSelectedPool] = useState<LivePool | null>(null);
   const [search, setSearch] = useState('');
 
-  const { pools, isLoading, error, secondsAgo, lastUpdated } = usePoolsData(30_000);
+  const { pools, isLoading, error, secondsAgo } = usePoolsData(30_000);
 
   const filteredPools = useMemo(() => {
     return pools.filter((p) => {
@@ -33,7 +35,7 @@ export default function PoolScannerPage() {
       if ((p.volume24h ?? 0) < filters.minVolume) return false;
       if (p.volumeToTVL < filters.minVolToTVL) return false;
       if (p.volatility > filters.maxVolatility) return false;
-      if (!filters.feeTiers.includes(p.fee)) return false;
+      if (filters.feeTiers.length > 0 && !filters.feeTiers.includes(p.fee)) return false;
       if (!filters.riskLevels.includes(p.riskLevel)) return false;
       if (p.analyticsScore < filters.minScore) return false;
       if (p.swapCount24h < filters.minSwaps) return false;
@@ -56,7 +58,6 @@ export default function PoolScannerPage() {
   return (
     <AppLayout>
       <div className="space-y-5 animate-fade-in">
-        {/* Header */}
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
             <h1 className="text-2xl font-bold text-foreground">Pool Scanner</h1>
@@ -69,13 +70,12 @@ export default function PoolScannerPage() {
               <Icon name="MagnifyingGlassIcon" size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
               <input
                 type="text"
-                placeholder="Search pair (e.g. ETH/USDC)"
+                placeholder="Search pair (e.g. WETH/USDG)"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="input-field pl-8 w-56 text-sm h-9"
               />
             </div>
-            {/* Live status indicator */}
             {isLoading ? (
               <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-muted/40 border border-border">
                 <div className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse" />
@@ -97,7 +97,6 @@ export default function PoolScannerPage() {
           </div>
         </div>
 
-        {/* Error banner */}
         {error && (
           <div className="rounded-xl border border-destructive/40 bg-destructive/10 p-4 flex items-start gap-3">
             <Icon name="ExclamationTriangleIcon" size={16} className="text-destructive flex-shrink-0 mt-0.5" />
@@ -108,29 +107,12 @@ export default function PoolScannerPage() {
           </div>
         )}
 
-        {/* Stats bar */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
-            {
-              label: 'Pools Discovered',
-              value: isLoading ? '…' : pools.length > 0 ? pools.length.toString() : 'N/A',
-              sub: 'Robinhood Chain',
-            },
-            {
-              label: 'Matching Filters',
-              value: isLoading ? '…' : filteredPools.length > 0 ? filteredPools.length.toString() : 'N/A',
-              sub: 'Current criteria',
-            },
-            {
-              label: 'Avg Score',
-              value: isLoading ? '…' : avgScore !== null ? avgScore.toString() : 'N/A',
-              sub: 'Analytics score',
-            },
-            {
-              label: 'Highest Vol/TVL',
-              value: isLoading ? '…' : highestVolTVL !== null ? `${highestVolTVL.toFixed(1)}x` : 'N/A',
-              sub: 'Best efficiency',
-            },
+            { label: 'Pools Discovered', value: isLoading ? '…' : pools.length.toString(), sub: 'Robinhood Chain' },
+            { label: 'Matching Filters', value: isLoading ? '…' : filteredPools.length.toString(), sub: 'Current criteria' },
+            { label: 'Avg Score', value: isLoading ? '…' : avgScore !== null ? avgScore.toString() : 'N/A', sub: 'Discovery score' },
+            { label: 'Highest Vol/TVL', value: isLoading ? '…' : highestVolTVL !== null ? `${highestVolTVL.toFixed(1)}x` : 'N/A', sub: 'Phase 2 metric' },
           ].map((stat) => (
             <div key={`stat-${stat.label}`} className="rounded-xl border border-border bg-card p-3 card-hover">
               <p className="data-label mb-1">{stat.label}</p>
@@ -140,24 +122,12 @@ export default function PoolScannerPage() {
           ))}
         </div>
 
-        {/* Main layout: filters + table */}
         <div className="flex gap-5 items-start">
-          <FilterSidebar
-            filters={filters}
-            onChange={setFilters}
-            onReset={() => setFilters(DEFAULT_FILTERS)}
-          />
+          <FilterSidebar filters={filters} onChange={setFilters} onReset={() => setFilters(DEFAULT_FILTERS)} />
 
           <div className="flex-1 min-w-0 space-y-4">
-            {/* Score breakdown panel */}
-            {selectedPool && (
-              <ScoreBreakdownPanel
-                pool={selectedPool}
-                onClose={() => setSelectedPool(null)}
-              />
-            )}
+            {selectedPool && <ScoreBreakdownPanel pool={selectedPool} onClose={() => setSelectedPool(null)} />}
 
-            {/* Table */}
             <div className="rounded-xl border border-border bg-card overflow-hidden card-hover">
               <div className="flex items-center justify-between p-4 border-b border-border">
                 <div className="flex items-center gap-2">
@@ -169,46 +139,36 @@ export default function PoolScannerPage() {
                 </div>
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <Icon name="InformationCircleIcon" size={13} />
-                  <span>Click a row to view score breakdown</span>
+                  <span>Live subgraph discovery</span>
                 </div>
               </div>
 
               {isLoading ? (
                 <div className="p-8 flex flex-col items-center gap-3">
                   <div className="w-8 h-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-                  <p className="text-sm text-muted-foreground">Fetching live pool data from Robinhood Chain…</p>
+                  <p className="text-sm text-muted-foreground">Fetching pools from Robinhood subgraph…</p>
                 </div>
               ) : error ? (
                 <div className="p-8 flex flex-col items-center gap-3">
                   <Icon name="ExclamationTriangleIcon" size={32} className="text-destructive/50" />
                   <p className="text-sm font-semibold text-destructive">DATA CONNECTION ERROR</p>
-                  <p className="text-xs text-muted-foreground text-center max-w-sm">
-                    Unable to retrieve live Robinhood Chain data. Pool indexer integration is required for pool discovery.
-                  </p>
+                  <p className="text-xs text-muted-foreground text-center max-w-sm">The Robinhood subgraph could not be reached.</p>
                 </div>
               ) : pools.length === 0 ? (
                 <div className="p-8 flex flex-col items-center gap-3">
                   <Icon name="MagnifyingGlassIcon" size={32} className="text-muted-foreground/40" />
                   <p className="text-sm font-semibold text-foreground">No pools found</p>
-                  <p className="text-xs text-muted-foreground text-center max-w-sm">
-                    Connected to Robinhood Chain. Pool indexer integration is required to discover and display live pools.
-                  </p>
+                  <p className="text-xs text-muted-foreground text-center max-w-sm">The subgraph is connected but returned no DLMMPool rows.</p>
                 </div>
               ) : (
-                <ScannerTable
-                  pools={filteredPools}
-                  onSelect={handleSelectPool}
-                  selectedId={selectedPool?.id}
-                />
+                <ScannerTable pools={filteredPools} onSelect={handleSelectPool} selectedId={selectedPool?.id} />
               )}
             </div>
 
-            {/* Disclaimer */}
             <div className="rounded-xl border border-warning/20 bg-warning-subtle p-3">
               <p className="text-xs text-warning/80">
-                <span className="font-semibold text-warning">Analytics Disclaimer:</span>{' '}
-                Analytics Score is a composite metric for informational purposes only. It is not a profit guarantee or investment advice.
-                High Vol/TVL may indicate unsustainable volume spikes. Always verify on-chain data independently before providing liquidity.
+                <span className="font-semibold text-warning">Phase 1:</span>{' '}
+                Pool discovery is sourced directly from the Robinhood Chain subgraph. 24h volume, volatility and APR are intentionally left unavailable until the real Swap data path is added in Phase 2.
               </p>
             </div>
           </div>

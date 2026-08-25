@@ -1,44 +1,27 @@
-'use server';
-
 import { NextResponse } from 'next/server';
+import { checkSubgraph, ROBINHOOD_CHAIN_ID, ROBINHOOD_SUBGRAPH_URL } from '@/lib/robinhoodSubgraph';
 
-const RPC_URL = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
-
-async function rpcCall(method: string, params: unknown[] = []) {
-  const res = await fetch(RPC_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    next: { revalidate: 0 },
-  });
-  if (!res.ok) throw new Error(`RPC HTTP error: ${res.status}`);
-  const data = await res.json();
-  if (data.error) throw new Error(`RPC error: ${data.error.message}`);
-  return data.result;
-}
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 export async function GET() {
   try {
-    const [blockHex, chainHex] = await Promise.all([
-      rpcCall('eth_blockNumber'),
-      rpcCall('eth_chainId'),
-    ]);
-
-    const blockNumber = parseInt(blockHex, 16);
-    const chainId = parseInt(chainHex, 16);
+    const result = await checkSubgraph();
 
     return NextResponse.json({
       status: 'connected',
-      chainId,
-      blockNumber,
-      rpcUrl: RPC_URL.replace(/\/\/.*@/, '//***@'), // mask credentials if any
+      chainId: ROBINHOOD_CHAIN_ID,
+      blockNumber: null,
+      source: 'subgraph',
+      subgraphEndpoint: ROBINHOOD_SUBGRAPH_URL,
+      poolsAvailable: result.pools,
       timestamp: Date.now(),
     });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
+    const message = err instanceof Error ? err.message : 'Unknown subgraph error';
     return NextResponse.json(
-      { status: 'error', error: message, timestamp: Date.now() },
-      { status: 503 }
+      { status: 'error', error: message, source: 'subgraph', timestamp: Date.now() },
+      { status: 503 },
     );
   }
 }
