@@ -20,9 +20,6 @@ export async function GET() {
     const poolAddresses = sourcePools.map((pool) => poolAddress(pool.id));
     const tokenAddresses = Array.from(new Set(sourcePools.flatMap((pool) => [tokenAddress(pool.tokenX), tokenAddress(pool.tokenY)]).filter(Boolean)));
 
-    // GeckoTerminal remains the primary pool-level source. GMGN is used as a
-    // targeted enrichment/fallback layer so a large pool snapshot does not
-    // spend the whole function budget querying hundreds of token endpoints.
     const market = await fetchGeckoPoolMarketData(poolAddresses);
     const missingPoolAddresses = new Set(poolAddresses.filter((address) => {
       const item = market.byPool.get(address);
@@ -30,8 +27,7 @@ export async function GET() {
     }));
     const priorityTokens = sourcePools.flatMap((pool) => {
       const address = poolAddress(pool.id);
-      if (!missingPoolAddresses.has(address)) return [];
-      return [tokenAddress(pool.tokenX), tokenAddress(pool.tokenY)];
+      return missingPoolAddresses.has(address) ? [tokenAddress(pool.tokenX), tokenAddress(pool.tokenY)] : [];
     });
     const gmgnAddresses = Array.from(new Set([...priorityTokens, ...tokenAddresses])).filter(Boolean).slice(0, MAX_GMGN_TOKENS);
 
@@ -52,9 +48,6 @@ export async function GET() {
       const tokenB = resolveTokenLabel(tokenY, tokenMetadata, base.tokenB, gmgnB?.symbol);
       const tokenAName = resolveTokenName(tokenX, tokenMetadata);
       const tokenBName = resolveTokenName(tokenY, tokenMetadata);
-
-      // Never use a token-wide GMGN liquidity/volume figure as if it were the
-      // liquidity/volume of this pool unless GMGN identifies this exact pool.
       const gmgnPoolA = gmgnPoolMatches(gmgnA?.biggestPoolAddress ?? null, address) ? gmgnA : null;
       const gmgnPoolB = gmgnPoolMatches(gmgnB?.biggestPoolAddress ?? null, address) ? gmgnB : null;
       const poolMatchedGmgn = gmgnPoolA || gmgnPoolB;
@@ -91,11 +84,15 @@ export async function GET() {
       return { ...pool, analyticsScore: getOpportunityScore(pool) };
     });
 
-    return NextResponse.json({ status: 'live', chainId: ROBINHOOD_CHAIN_ID, blockNumber: null, pools,
+    return NextResponse.json({
+      status: 'live',
+      chainId: ROBINHOOD_CHAIN_ID,
+      blockNumber: null,
+      pools,
       dataQuality: {
         poolSource: 'Robinhood Chain DLMM subgraph',
-        marketSource: 'GeckoTerminal pool API with exact-pool GMGN fallback',
-        volumeSource: 'GeckoTerminal pool data; GMGN only when its largest pool matches the requested pool',
+        marketSource: 'GeckoTerminal pool multi endpoint with exact-pool GMGN fallback',
+        volumeSource: 'GeckoTerminal pool data; GMGN only when its largest identified pool matches the requested pool',
         tokenSource: 'Robinhood asset registry + Blockscout + GMGN + DLMM subgraph fallback',
         gmgnEnabled: gmgn.configured,
         gmgnTokensAttempted: gmgn.tokensAttempted,
@@ -108,6 +105,8 @@ export async function GET() {
         poolsDiscovered: sourcePools.length,
         poolsWithMarketData: market.poolsReturned,
         poolsMissingPrimaryMarketData: missingPoolAddresses.size,
+        geckoBatchesSucceeded: market.batchesSucceeded,
+        geckoBatchesAttempted: market.batchesAttempted,
         note: 'Price, liquidity, volume and swaps prefer verified pool-level GeckoTerminal data. GMGN token data is used for targeted enrichment and only exact-pool liquidity/volume/swap fallback. 24h volatility is displayed as absolute 24h price movement, not fabricated statistical volatility. APR is a simple 24h fee run-rate estimate.'
       },
       indexer: { status: 'live', lastIndexedBlock: 0, lastIndexedTimestamp: Date.now(), poolsDiscovered: pools.length, swapsIndexed: null, protocol: 'Robinhood DLMM', factoryAddress: null, subgraphEndpoint: ROBINHOOD_SUBGRAPH_URL, error: null },
