@@ -19,13 +19,7 @@ export interface StreamStatus {
   hasRealPoolData: boolean;
 }
 
-/**
- * V1 data hook.
- *
- * Robinhood pool discovery is currently backed by the verified subgraph API.
- * V1 intentionally uses simple REST polling instead of an SSE/WebSocket layer
- * because the serverless deployment does not expose a persistent stream.
- */
+/** V1 uses verified subgraph REST polling; no persistent stream is required. */
 export function usePoolStream() {
   const {
     pools,
@@ -92,8 +86,19 @@ export function usePoolStream() {
 
 export function useSinglePoolStream(poolAddress?: string) {
   const { pools, streamStatus, isLoading, error, secondsAgo, refetch } = usePoolStream();
-  const pool = poolAddress
-    ? pools.find((p: LivePool) => p.address.toLowerCase() === poolAddress.toLowerCase())
+  const [routeAddress, setRouteAddress] = useState<string | undefined>(poolAddress);
+
+  useEffect(() => {
+    if (poolAddress) {
+      setRouteAddress(poolAddress);
+      return;
+    }
+    const address = new URLSearchParams(window.location.search).get('address') || undefined;
+    setRouteAddress(address);
+  }, [poolAddress]);
+
+  const pool = routeAddress
+    ? pools.find((p: LivePool) => p.address.toLowerCase() === routeAddress.toLowerCase())
     : pools[0];
 
   return {
