@@ -53,121 +53,79 @@ export interface PositionsState {
 
 export function usePositions(walletAddress: string | null, chainId: number | null) {
   const [state, setState] = useState<PositionsState>({
-    positions: [],
-    isLoading: false,
-    isRefreshing: false,
-    error: null,
-    walletAddress: null,
-    chainId: null,
-    isCorrectChain: false,
-    dataSource: 'none',
-    lastUpdated: null,
-    positionCount: 0,
+    positions: [], isLoading: false, isRefreshing: false, error: null,
+    walletAddress: null, chainId: null, isCorrectChain: false,
+    dataSource: 'none', lastUpdated: null, positionCount: 0,
   });
 
   const abortRef = useRef<AbortController | null>(null);
-  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
+  const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isCorrectChain = chainId === ROBINHOOD_CHAIN_ID;
 
-  const fetchPositions = useCallback(
-    async (isRefresh = false) => {
-      if (!walletAddress || !isCorrectChain) return;
+  const fetchPositions = useCallback(async (isRefresh = false) => {
+    if (!walletAddress || !isCorrectChain) return;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
 
-      // Cancel any in-flight request
-      if (abortRef.current) abortRef.current.abort();
-      abortRef.current = new AbortController();
-
+    setState((prev) => ({ ...prev, isLoading: !isRefresh, isRefreshing: isRefresh, error: null, walletAddress, chainId, isCorrectChain: true }));
+    try {
+      const res = await fetch(`/api/chain/positions?address=${encodeURIComponent(walletAddress)}`, {
+        cache: 'no-store', signal: controller.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+      if (controller.signal.aborted) return;
+      const nextPositions: DLMMPosition[] = Array.isArray(data.positions) ? data.positions : [];
       setState((prev) => ({
         ...prev,
-        isLoading: !isRefresh,
-        isRefreshing: isRefresh,
-        error: null,
-      }));
-
-      try {
-        const res = await fetch(`/api/chain/positions?address=${walletAddress}`, {
-          cache: 'no-store',
-          signal: abortRef.current.signal,
-        });
-
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.error || `HTTP ${res.status}`);
-        }
-
-        const data = await res.json();
-
-        setState((prev) => ({
-          ...prev,
-          positions: data.positions || [],
-          isLoading: false,
-          isRefreshing: false,
-          error: null,
-          walletAddress,
-          chainId,
-          isCorrectChain: true,
-          dataSource: data.dataSource || 'none',
-          lastUpdated: data.timestamp || Date.now(),
-          positionCount: data.positionCount || 0,
-        }));
-      } catch (err: unknown) {
-        if (err instanceof Error && err.name === 'AbortError') return;
-        setState((prev) => ({
-          ...prev,
-          isLoading: false,
-          isRefreshing: false,
-          error: err instanceof Error ? err.message : 'Failed to fetch positions',
-        }));
-      }
-    },
-    [walletAddress, isCorrectChain, chainId]
-  );
-
-  // Initial fetch when wallet connects or chain changes
-  useEffect(() => {
-    if (walletAddress && isCorrectChain) {
-      fetchPositions(false);
-    } else {
-      setState((prev) => ({
-        ...prev,
-        positions: [],
+        positions: nextPositions,
         isLoading: false,
         isRefreshing: false,
         error: null,
         walletAddress,
         chainId,
-        isCorrectChain,
-        dataSource: 'none',
-        lastUpdated: null,
-        positionCount: 0,
+        isCorrectChain: true,
+        dataSource: data.dataSource || 'none',
+        lastUpdated: data.timestamp || Date.now(),
+        positionCount: typeof data.positionCount === 'number' ? data.positionCount : nextPositions.length,
       }));
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') return;
+      setState((prev) => ({ ...prev, isLoading: false, isRefreshing: false, error: err instanceof Error ? err.message : 'Failed to fetch positions' }));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [walletAddress, isCorrectChain]);
+  }, [walletAddress, isCorrectChain, chainId]);
 
-  // Periodic refresh every 30 seconds when connected
+  useEffect(() => {
+    // Clear immediately when account/network changes so the previous wallet's
+    // positions can never remain visible while the new wallet is loading.
+    setState((prev) => ({
+      ...prev,
+      positions: [], isLoading: !!walletAddress && isCorrectChain, isRefreshing: false,
+      error: null, walletAddress, chainId, isCorrectChain,
+      dataSource: 'none', lastUpdated: null, positionCount: 0,
+    }));
+    abortRef.current?.abort();
+    if (walletAddress && isCorrectChain) fetchPositions(false);
+    // fetchPositions is intentionally included: it is stable for this wallet/chain pair.
+  }, [walletAddress, chainId, isCorrectChain, fetchPositions]);
+
   useEffect(() => {
     if (!walletAddress || !isCorrectChain) return;
-
-    refreshTimerRef.current = setInterval(() => {
-      fetchPositions(true);
-    }, 30_000);
-
+    refreshTimerRef.current = setInterval(() => fetchPositions(true), 15_000);
+    const onVisibility = () => { if (document.visibilityState === 'visible') fetchPositions(true); };
+    const onFocus = () => fetchPositions(true);
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', onFocus);
     return () => {
       if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', onFocus);
     };
   }, [walletAddress, isCorrectChain, fetchPositions]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (abortRef.current) abortRef.current.abort();
-      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
-    };
-  }, []);
+  useEffect(() => () => { abortRef.current?.abort(); if (refreshTimerRef.current) clearInterval(refreshTimerRef.current); }, []);
 
   const refresh = useCallback(() => fetchPositions(true), [fetchPositions]);
-
   return { ...state, refresh };
 }
