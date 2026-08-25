@@ -1,8 +1,9 @@
 const GMGN_HOST = 'https://openapi.gmgn.ai';
 const GMGN_TIMEOUT_MS = 6_000;
 const GMGN_CHAIN = 'robinhood';
-const GMGN_CONCURRENCY = 8;
-const GMGN_BATCH_DELAY_MS = 450;
+const GMGN_CONCURRENCY = 6;
+const GMGN_BATCH_DELAY_MS = 550;
+const GMGN_RETRY_DELAY_MS = 900;
 
 export interface GmgnTokenData {
   address: string;
@@ -31,6 +32,7 @@ interface GmgnEnvelope {
 }
 
 function finite(value: unknown): number | null {
+  if (typeof value === 'string' && value.trim() === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -47,23 +49,31 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function firstRecord(...values: unknown[]): Record<string, unknown> | null {
+  for (const value of values) {
+    const record = asRecord(value);
+    if (record) return record;
+  }
+  return null;
+}
+
 function extractData(envelope: GmgnEnvelope): Record<string, unknown> | null {
   const data = asRecord(envelope.data);
-  if (data) return data;
-  return null;
+  if (!data) return null;
+  return asRecord(data.data) ?? data;
 }
 
 function isRateLimited(response: Response, envelope: GmgnEnvelope | null): boolean {
   if (response.status === 429) return true;
-  const error = String(envelope?.error || '').toUpperCase();
-  return error === 'RATE_LIMIT_EXCEEDED' || error === 'RATE_LIMIT_BANNED';
+  const error = String(envelope?.error || envelope?.message || '').toUpperCase();
+  return error.includes('RATE_LIMIT') || error.includes('TOO MANY REQUEST');
 }
 
 export function isGmgnConfigured(): boolean {
   return Boolean(process.env.GMGN_API_KEY);
 }
 
-async function fetchToken(address: string): Promise<GmgnTokenData | null> {
+async function requestToken(address: string, retry = false): Promise<GmgnTokenData | null> {
   const apiKey = process.env.GMGN_API_KEY;
   if (!apiKey) return null;
 
@@ -77,47 +87,46 @@ async function fetchToken(address: string): Promise<GmgnTokenData | null> {
       client_id: crypto.randomUUID(),
     });
     const response = await fetch(`${GMGN_HOST}/v1/token/info?${query.toString()}`, {
-      headers: {
-        accept: 'application/json',
-        'X-APIKEY': apiKey,
-      },
+      headers: { accept: 'application/json', 'X-APIKEY': apiKey },
       cache: 'no-store',
       signal: controller.signal,
     });
 
     let envelope: GmgnEnvelope | null = null;
-    try {
-      envelope = await response.json() as GmgnEnvelope;
-    } catch {
-      return null;
-    }
+    try { envelope = await response.json() as GmgnEnvelope; } catch { return null; }
 
-    // Do not hammer a temporary GMGN cooldown. The caller will continue with
-    // the remaining addresses and surface the number of successful enrichments.
-    if (!response.ok || isRateLimited(response, envelope)) return null;
+    if (isRateLimited(response, envelope) && !retry) {
+      await new Promise((resolve) => setTimeout(resolve, GMGN_RETRY_DELAY_MS));
+      return requestToken(address, true);
+    }
+    if (!response.ok) return null;
 
     const data = extractData(envelope);
     if (!data) return null;
 
-    const price = asRecord(data.price);
-    const pool = asRecord(data.pool);
-    const walletTags = asRecord(data.wallet_tags_stat);
+    const price = firstRecord(data.price, data.market, data.market_data);
+    const pool = firstRecord(data.pool, data.liquidity_pool, data.pool_info);
+    const walletTags = firstRecord(data.wallet_tags_stat, data.wallet_tags, data.smart_money);
+
+    const biggestPool = typeof data.biggest_pool_address === 'string'
+      ? data.biggest_pool_address
+      : typeof pool?.address === 'string' ? pool.address : null;
 
     return {
       address: String(data.address || address).toLowerCase(),
       symbol: typeof data.symbol === 'string' ? data.symbol : null,
       name: typeof data.name === 'string' ? data.name : null,
-      priceUsd: firstFinite(price?.price),
-      liquidityUsd: firstFinite(data.liquidity, pool?.liquidity),
-      holderCount: firstFinite(data.holder_count),
-      volume24h: firstFinite(price?.volume_24h),
-      swaps24h: firstFinite(price?.swaps_24h),
-      smartWallets: firstFinite(walletTags?.smart_wallets),
-      renownedWallets: firstFinite(walletTags?.renowned_wallets),
-      rugRatio: firstFinite(data.rug_ratio),
+      priceUsd: firstFinite(price?.price, data.price_usd, data.price),
+      liquidityUsd: firstFinite(data.liquidity, pool?.liquidity, pool?.liquidity_usd, data.liquidity_usd),
+      holderCount: firstFinite(data.holder_count, data.holders),
+      volume24h: firstFinite(price?.volume_24h, data.volume_24h),
+      swaps24h: firstFinite(price?.swaps_24h, data.swaps_24h),
+      smartWallets: firstFinite(walletTags?.smart_wallets, data.smart_wallets),
+      renownedWallets: firstFinite(walletTags?.renowned_wallets, data.renowned_wallets),
+      rugRatio: firstFinite(data.rug_ratio, data.rug_ratio_pct),
       washTrading: typeof data.is_wash_trading === 'boolean' ? data.is_wash_trading : null,
-      biggestPoolAddress: typeof data.biggest_pool_address === 'string' ? data.biggest_pool_address.toLowerCase() : null,
-      exchange: typeof pool?.exchange === 'string' ? pool.exchange : null,
+      biggestPoolAddress: biggestPool ? biggestPool.toLowerCase() : null,
+      exchange: typeof pool?.exchange === 'string' ? pool.exchange : typeof data.exchange === 'string' ? data.exchange : null,
       source: 'gmgn',
     };
   } catch {
@@ -135,29 +144,15 @@ export async function fetchGmgnTokenData(addresses: string[]): Promise<{
 }> {
   const unique = Array.from(new Set(addresses.map((address) => address.toLowerCase()).filter(Boolean)));
   const configured = isGmgnConfigured();
-  if (!unique.length || !configured) {
-    return { byToken: new Map(), configured, tokensReturned: 0, tokensAttempted: 0 };
-  }
+  if (!unique.length || !configured) return { byToken: new Map(), configured, tokensReturned: 0, tokensAttempted: 0 };
 
   const byToken = new Map<string, GmgnTokenData>();
-
-  // GMGN documents a leaky-bucket limit of 20 requests/sec with a burst
-  // capacity of 20 for token-info. Keep concurrency and pacing conservative so
-  // a 100+ token pool snapshot does not immediately trigger a 429 cooldown.
   for (let offset = 0; offset < unique.length; offset += GMGN_CONCURRENCY) {
     const batch = unique.slice(offset, offset + GMGN_CONCURRENCY);
-    const results = await Promise.all(batch.map(fetchToken));
+    const results = await Promise.all(batch.map((address) => requestToken(address)));
     for (const item of results) if (item) byToken.set(item.address, item);
-
-    if (offset + GMGN_CONCURRENCY < unique.length) {
-      await new Promise((resolve) => setTimeout(resolve, GMGN_BATCH_DELAY_MS));
-    }
+    if (offset + GMGN_CONCURRENCY < unique.length) await new Promise((resolve) => setTimeout(resolve, GMGN_BATCH_DELAY_MS));
   }
 
-  return {
-    byToken,
-    configured: true,
-    tokensReturned: byToken.size,
-    tokensAttempted: unique.length,
-  };
+  return { byToken, configured: true, tokensReturned: byToken.size, tokensAttempted: unique.length };
 }
