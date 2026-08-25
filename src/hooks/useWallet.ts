@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 
 export const ROBINHOOD_CHAIN_ID = 4663;
 export const ROBINHOOD_CHAIN_HEX = '0x' + ROBINHOOD_CHAIN_ID.toString(16); // 0x1237
@@ -22,7 +22,6 @@ export interface LPPosition {
   usdValue: number;
   fee: number;
   inRange: boolean;
-  // Extended position metrics
   capital: number;
   currentValue: number;
   pnl: number;
@@ -65,33 +64,41 @@ declare global {
   }
 }
 
-export function useWallet(): WalletState & {
+type WalletActions = {
   connect: () => Promise<void>;
   disconnect: () => void;
   switchToRobinhoodChain: () => Promise<void>;
-} {
-  const [state, setState] = useState<WalletState>({
-    isConnected: false,
-    isConnecting: false,
-    account: null,
-    chainId: null,
-    isCorrectChain: false,
-    ethBalance: null,
-    tokenBalances: [],
-    lpPositions: [],
-    isSwitchingChain: false,
-    isLoadingBalances: false,
-    error: null,
-  });
+};
 
-  const setPartial = (partial: Partial<WalletState>) =>
+type WalletContextValue = WalletState & WalletActions;
+
+const WalletContext = createContext<WalletContextValue | null>(null);
+
+const EMPTY_STATE: WalletState = {
+  isConnected: false,
+  isConnecting: false,
+  account: null,
+  chainId: null,
+  isCorrectChain: false,
+  ethBalance: null,
+  tokenBalances: [],
+  lpPositions: [],
+  isSwitchingChain: false,
+  isLoadingBalances: false,
+  error: null,
+};
+
+export function WalletProvider({ children }: { children: React.ReactNode }) {
+  const [state, setState] = useState<WalletState>(EMPTY_STATE);
+
+  const setPartial = useCallback((partial: Partial<WalletState>) => {
     setState((prev) => ({ ...prev, ...partial }));
+  }, []);
 
   const loadBalances = useCallback(async (account: string) => {
     if (!window.ethereum) return;
     setPartial({ isLoadingBalances: true, error: null });
     try {
-      // Fetch real wallet data from server-side API route
       const res = await fetch(`/api/chain/wallet?address=${account}`, { cache: 'no-store' });
       const data = await res.json();
 
@@ -120,82 +127,73 @@ export function useWallet(): WalletState & {
         lpPositions: [],
       });
     }
-  }, []);
+  }, [setPartial]);
 
-  const handleAccountsChanged = useCallback(
-    (accounts: unknown) => {
-      const accs = accounts as string[];
-      if (!accs || accs.length === 0) {
-        setState({
-          isConnected: false,
-          isConnecting: false,
-          account: null,
-          chainId: null,
-          isCorrectChain: false,
-          ethBalance: null,
-          tokenBalances: [],
-          lpPositions: [],
-          isSwitchingChain: false,
-          isLoadingBalances: false,
-          error: null,
-        });
-      } else {
-        setPartial({ account: accs[0], isConnected: true });
-        loadBalances(accs[0]);
-      }
-    },
-    [loadBalances]
-  );
+  const handleAccountsChanged = useCallback((accounts: unknown) => {
+    const accs = accounts as string[];
+    if (!accs || accs.length === 0) {
+      setState(EMPTY_STATE);
+      return;
+    }
 
-  const handleChainChanged = useCallback(
-    (chainIdHex: unknown) => {
-      const id = parseInt(chainIdHex as string, 16);
-      setPartial({ chainId: id, isCorrectChain: id === ROBINHOOD_CHAIN_ID });
-    },
-    []
-  );
+    setPartial({ account: accs[0], isConnected: true, error: null });
+    void loadBalances(accs[0]);
+  }, [loadBalances, setPartial]);
+
+  const handleChainChanged = useCallback((chainIdHex: unknown) => {
+    const id = parseInt(chainIdHex as string, 16);
+    setPartial({ chainId: id, isCorrectChain: id === ROBINHOOD_CHAIN_ID });
+  }, [setPartial]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.ethereum) return;
 
-    window.ethereum
-      .request({ method: 'eth_accounts' })
-      .then((accounts) => {
-        const accs = accounts as string[];
-        if (accs && accs.length > 0) {
-          window.ethereum!.request({ method: 'eth_chainId' }).then((chainIdHex) => {
-            const id = parseInt(chainIdHex as string, 16);
-            setPartial({
-              account: accs[0],
-              isConnected: true,
-              chainId: id,
-              isCorrectChain: id === ROBINHOOD_CHAIN_ID,
-            });
-            loadBalances(accs[0]);
-          });
-        }
-      })
-      .catch(() => {});
+    let cancelled = false;
 
+    const hydrate = async () => {
+      try {
+        const accounts = (await window.ethereum!.request({ method: 'eth_accounts' })) as string[];
+        if (cancelled || !accounts?.length) return;
+
+        const chainIdHex = (await window.ethereum!.request({ method: 'eth_chainId' })) as string;
+        if (cancelled) return;
+
+        const id = parseInt(chainIdHex, 16);
+        setPartial({
+          account: accounts[0],
+          isConnected: true,
+          chainId: id,
+          isCorrectChain: id === ROBINHOOD_CHAIN_ID,
+          error: null,
+        });
+        void loadBalances(accounts[0]);
+      } catch {
+        // Wallet providers may reject passive account discovery; keep the UI disconnected.
+      }
+    };
+
+    void hydrate();
     window.ethereum.on('accountsChanged', handleAccountsChanged);
     window.ethereum.on('chainChanged', handleChainChanged);
 
     return () => {
+      cancelled = true;
       window.ethereum?.removeListener('accountsChanged', handleAccountsChanged);
       window.ethereum?.removeListener('chainChanged', handleChainChanged);
     };
-  }, [handleAccountsChanged, handleChainChanged, loadBalances]);
+  }, [handleAccountsChanged, handleChainChanged, loadBalances, setPartial]);
 
   const connect = useCallback(async () => {
     if (!window.ethereum) {
       setPartial({ error: 'No wallet detected. Please install MetaMask or Rabby.' });
       return;
     }
+
     setPartial({ isConnecting: true, error: null });
     try {
-      const accounts = (await window.ethereum.request({
-        method: 'eth_requestAccounts',
-      })) as string[];
+      const accounts = (await window.ethereum.request({ method: 'eth_requestAccounts' })) as string[];
+      if (!accounts?.length) throw new Error('No wallet account was returned.');
+
       const chainIdHex = (await window.ethereum.request({ method: 'eth_chainId' })) as string;
       const id = parseInt(chainIdHex, 16);
       setPartial({
@@ -210,22 +208,12 @@ export function useWallet(): WalletState & {
       const msg = err instanceof Error ? err.message : 'Connection failed';
       setPartial({ isConnecting: false, error: msg });
     }
-  }, [loadBalances]);
+  }, [loadBalances, setPartial]);
 
   const disconnect = useCallback(() => {
-    setState({
-      isConnected: false,
-      isConnecting: false,
-      account: null,
-      chainId: null,
-      isCorrectChain: false,
-      ethBalance: null,
-      tokenBalances: [],
-      lpPositions: [],
-      isSwitchingChain: false,
-      isLoadingBalances: false,
-      error: null,
-    });
+    // This only clears BINARA's shared UI state. The wallet extension itself
+    // remains connected so other dapps are not disconnected.
+    setState(EMPTY_STATE);
   }, []);
 
   const switchToRobinhoodChain = useCallback(async () => {
@@ -237,20 +225,17 @@ export function useWallet(): WalletState & {
         params: [{ chainId: ROBINHOOD_CHAIN_HEX }],
       });
     } catch (switchError: unknown) {
-      // Chain not added — add it
       if ((switchError as { code?: number }).code === 4902) {
         try {
           await window.ethereum.request({
             method: 'wallet_addEthereumChain',
-            params: [
-              {
-                chainId: ROBINHOOD_CHAIN_HEX,
-                chainName: 'Robinhood Chain',
-                nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
-                rpcUrls: ['https://rpc.mainnet.chain.robinhood.com'],
-                blockExplorerUrls: ['https://robinhoodchain.blockscout.com'],
-              },
-            ],
+            params: [{
+              chainId: ROBINHOOD_CHAIN_HEX,
+              chainName: 'Robinhood Chain',
+              nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+              rpcUrls: ['https://rpc.mainnet.chain.robinhood.com'],
+              blockExplorerUrls: ['https://robinhoodchain.blockscout.com'],
+            }],
           });
         } catch (addError: unknown) {
           const msg = addError instanceof Error ? addError.message : 'Failed to add chain';
@@ -260,7 +245,22 @@ export function useWallet(): WalletState & {
     } finally {
       setPartial({ isSwitchingChain: false });
     }
-  }, []);
+  }, [setPartial]);
 
-  return { ...state, connect, disconnect, switchToRobinhoodChain };
+  const value: WalletContextValue = {
+    ...state,
+    connect,
+    disconnect,
+    switchToRobinhoodChain,
+  };
+
+  return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
+}
+
+export function useWallet(): WalletContextValue {
+  const context = useContext(WalletContext);
+  if (!context) {
+    throw new Error('useWallet must be used inside WalletProvider');
+  }
+  return context;
 }
