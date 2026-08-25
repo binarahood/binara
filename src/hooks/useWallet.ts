@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 
 export const ROBINHOOD_CHAIN_ID = 4663;
 export const ROBINHOOD_CHAIN_HEX = '0x' + ROBINHOOD_CHAIN_ID.toString(16); // 0x1237
@@ -211,8 +211,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   }, [loadBalances, setPartial]);
 
   const disconnect = useCallback(() => {
-    // This only clears BINARA's shared UI state. The wallet extension itself
-    // remains connected so other dapps are not disconnected.
+    // Clear BINARA's shared UI state without disconnecting the wallet extension itself.
     setState(EMPTY_STATE);
   }, []);
 
@@ -254,7 +253,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     switchToRobinhoodChain,
   };
 
-  return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
+  return React.createElement(WalletContext.Provider, { value }, children);
 }
 
 export function useWallet(): WalletContextValue {
