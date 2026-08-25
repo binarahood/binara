@@ -1,47 +1,15 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
-import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  ReferenceLine,
-} from 'recharts';
+import React, { useMemo, useState } from 'react';
 
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1D'] as const;
 type Timeframe = typeof TIMEFRAMES[number];
 
 function formatPrice(v: number) {
+  if (!Number.isFinite(v)) return 'N/A';
   if (v >= 1000) return `$${v.toFixed(2)}`;
   if (v >= 1) return `$${v.toFixed(4)}`;
   return `$${v.toFixed(8)}`;
-}
-
-interface CustomTooltipProps {
-  active?: boolean;
-  payload?: Array<{ value: number; name: string }>;
-  label?: string;
-}
-
-function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div className="rounded-xl border border-border bg-card p-3 shadow-xl text-sm min-w-[160px]">
-      <p className="text-muted-foreground text-xs mb-2 font-mono-nums">{label}</p>
-      {payload.map((entry, i) => (
-        <div key={`price-tt-${i + 1}`} className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground capitalize text-xs">{entry.name}</span>
-          <span className="font-mono-nums font-semibold text-foreground text-xs">
-            {formatPrice(entry.value)}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
 }
 
 interface PriceChartProps {
@@ -53,119 +21,67 @@ interface PriceChartProps {
 export default function PriceChart({ currentPrice, lowerRange, upperRange }: PriceChartProps) {
   const [timeframe, setTimeframe] = useState<Timeframe>('1h');
 
-  // Generate synthetic price history around current price
-  // Real price history requires a subgraph query with OHLCV data
-  const chartData = React.useMemo(() => {
-    if (!currentPrice || currentPrice === 0) return [];
-
+  // Deterministic estimated history. Avoid Math.random()/chart-library runtime issues;
+  // real OHLCV will replace this once historical pool indexing is available.
+  const chartData = useMemo(() => {
+    if (!Number.isFinite(currentPrice) || currentPrice <= 0) return [];
     const points = 24;
-    const volatility = 0.02; // 2% volatility assumption
-    const data = [];
-    let price = currentPrice * (1 - volatility * 5);
-
-    for (let i = 0; i < points; i++) {
-      const change = (Math.random() - 0.48) * volatility * currentPrice;
-      price = Math.max(price + change, currentPrice * 0.8);
-      price = Math.min(price, currentPrice * 1.2);
-
-      const hour = i - points + 1;
-      const label = hour === 0 ? 'Now' : `${Math.abs(hour)}h ago`;
-
-      data.push({
-        time: label,
-        price: i === points - 1 ? currentPrice : price,
-        high: price * 1.005,
-        low: price * 0.995,
-      });
-    }
-
-    return data;
+    return Array.from({ length: points }, (_, i) => {
+      const progress = i / (points - 1);
+      const wave = Math.sin(i * 0.72) * 0.012 + Math.sin(i * 0.21) * 0.008;
+      const trend = (progress - 1) * 0.008;
+      const price = i === points - 1 ? currentPrice : currentPrice * (1 + wave + trend);
+      return { price: Math.max(price, currentPrice * 0.8), label: i === points - 1 ? 'Now' : `${points - 1 - i}h ago` };
+    });
   }, [currentPrice]);
 
-  if (!currentPrice || currentPrice === 0) {
-    return (
-      <div className="flex items-center justify-center h-48">
-        <p className="text-xs text-muted-foreground">Price data unavailable — awaiting indexed pool data</p>
-      </div>
-    );
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0 || chartData.length < 2) {
+    return <div className="flex items-center justify-center h-48"><p className="text-xs text-muted-foreground">Price data unavailable — awaiting indexed pool data</p></div>;
   }
+
+  const width = 760;
+  const height = 200;
+  const padX = 8;
+  const padY = 16;
+  const values = chartData.map((p) => p.price).concat([lowerRange ?? currentPrice, upperRange ?? currentPrice]);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = Math.max(max - min, currentPrice * 0.01);
+  const yMin = min - span * 0.08;
+  const yMax = max + span * 0.08;
+  const x = (i: number) => padX + (i / (chartData.length - 1)) * (width - padX * 2);
+  const y = (v: number) => height - padY - ((v - yMin) / Math.max(yMax - yMin, Number.EPSILON)) * (height - padY * 2);
+  const points = chartData.map((p, i) => `${x(i)},${y(p.price)}`).join(' ');
+  const areaPoints = `${padX},${height - padY} ${points} ${width - padX},${height - padY}`;
+  const lowerY = lowerRange && lowerRange > 0 ? y(lowerRange) : null;
+  const upperY = upperRange && upperRange > 0 ? y(upperRange) : null;
 
   return (
     <div className="space-y-3">
-      {/* Timeframe selector */}
       <div className="flex items-center gap-1">
         {TIMEFRAMES.map((tf) => (
-          <button
-            key={tf}
-            suppressHydrationWarning
-            onClick={() => setTimeframe(tf)}
-            className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all ${
-              timeframe === tf
-                ? 'bg-primary/20 text-primary border border-primary/30' :'text-muted-foreground hover:text-foreground hover:bg-muted/40'
-            }`}
-          >
-            {tf}
-          </button>
+          <button key={tf} onClick={() => setTimeframe(tf)} className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all ${timeframe === tf ? 'bg-primary/20 text-primary border border-primary/30' : 'text-muted-foreground hover:text-foreground hover:bg-muted/40'}`}>{tf}</button>
         ))}
-        <span className="ml-auto text-xs text-muted-foreground/60">
-          * Estimated — real OHLCV requires subgraph
-        </span>
+        <span className="ml-auto text-xs text-muted-foreground/60">* Estimated — real OHLCV requires subgraph</span>
       </div>
 
-      <ResponsiveContainer width="100%" height={200}>
-        <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+      <div className="w-full overflow-hidden rounded-lg">
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-[200px]" role="img" aria-label="Estimated pool price chart">
           <defs>
-            <linearGradient id="priceGradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="var(--primary)" stopOpacity={0.3} />
-              <stop offset="95%" stopColor="var(--primary)" stopOpacity={0} />
+            <linearGradient id="binaraPriceGradient" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="var(--primary)" stopOpacity="0.28" />
+              <stop offset="95%" stopColor="var(--primary)" stopOpacity="0" />
             </linearGradient>
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-          <XAxis
-            dataKey="time"
-            tick={{ fill: 'var(--muted-foreground)', fontSize: 11 }}
-            axisLine={false}
-            tickLine={false}
-            interval={5}
-          />
-          <YAxis
-            tick={{ fill: 'var(--muted-foreground)', fontSize: 11 }}
-            axisLine={false}
-            tickLine={false}
-            tickFormatter={formatPrice}
-            width={72}
-            domain={['auto', 'auto']}
-          />
-          <Tooltip content={<CustomTooltip />} />
-          {lowerRange && lowerRange > 0 && (
-            <ReferenceLine
-              y={lowerRange}
-              stroke="var(--warning)"
-              strokeDasharray="4 4"
-              strokeWidth={1.5}
-              label={{ value: 'Lower', fill: 'var(--warning)', fontSize: 10, position: 'right' }}
-            />
-          )}
-          {upperRange && upperRange > 0 && (
-            <ReferenceLine
-              y={upperRange}
-              stroke="var(--warning)"
-              strokeDasharray="4 4"
-              strokeWidth={1.5}
-              label={{ value: 'Upper', fill: 'var(--warning)', fontSize: 10, position: 'right' }}
-            />
-          )}
-          <Area
-            type="monotone"
-            dataKey="price"
-            name="price"
-            stroke="var(--primary)"
-            strokeWidth={2}
-            fill="url(#priceGradient)"
-            dot={false}
-          />
-        </AreaChart>
-      </ResponsiveContainer>
+          {[0.25, 0.5, 0.75].map((r) => <line key={r} x1={padX} x2={width - padX} y1={padY + r * (height - padY * 2)} y2={padY + r * (height - padY * 2)} stroke="var(--border)" strokeDasharray="3 3" />)}
+          {lowerY !== null && lowerY >= 0 && lowerY <= height && <line x1={padX} x2={width - padX} y1={lowerY} y2={lowerY} stroke="var(--warning)" strokeDasharray="4 4" strokeWidth="1.5" />}
+          {upperY !== null && upperY >= 0 && upperY <= height && <line x1={padX} x2={width - padX} y1={upperY} y2={upperY} stroke="var(--warning)" strokeDasharray="4 4" strokeWidth="1.5" />}
+          <polygon points={areaPoints} fill="url(#binaraPriceGradient)" />
+          <polyline points={points} fill="none" stroke="var(--primary)" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+          <circle cx={x(chartData.length - 1)} cy={y(currentPrice)} r="4" fill="var(--primary)" />
+        </svg>
+      </div>
+      <div className="flex items-center justify-between text-xs text-muted-foreground font-mono-nums"><span>{chartData[0].label}</span><span>Current: {formatPrice(currentPrice)}</span><span>{chartData[chartData.length - 1].label}</span></div>
     </div>
   );
 }
