@@ -38,7 +38,7 @@ export function useChainStatus() {
   return { chainStatus, refetch: fetchStatus };
 }
 
-export function usePoolsData(intervalMs = POOL_INTERVAL_MS, visibilityMode: PoolVisibility = 'active') {
+export function usePoolsData(intervalMs = POOL_INTERVAL_MS, visibilityMode: PoolVisibility | 'all' = 'active') {
   const [pools, setPools] = useState<LivePool[]>([]);
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics>(() => computeDashboardMetrics([]));
   const [isLoading, setIsLoading] = useState(true);
@@ -51,7 +51,7 @@ export function usePoolsData(intervalMs = POOL_INTERVAL_MS, visibilityMode: Pool
       if (!res.ok || data.error) { setError(data.error || 'Unable to retrieve live Robinhood Chain data.'); setIsLoading(false); return; }
       const rawPools: LivePool[] = data.pools || [];
       const classified = rawPools.map((pool) => ({ ...pool, visibility: getPoolVisibility(pool) }));
-      const visiblePools = classified.filter((pool) => visibilityMode === 'active' ? pool.visibility === 'active' : pool.visibility === visibilityMode);
+      const visiblePools = classified.filter((pool) => visibilityMode === 'all' || pool.visibility === visibilityMode);
       setPools(visiblePools); setDashboardMetrics(computeDashboardMetrics(classified.filter((p) => p.visibility === 'active'))); setLastUpdated(Date.now()); setIndexerStatus(data.indexer?.status ?? null); setError(null);
     } catch { setError('Unable to retrieve live Robinhood Chain data.'); } finally { setIsLoading(false); }
   }, [visibilityMode]);
@@ -62,9 +62,7 @@ export function usePoolsData(intervalMs = POOL_INTERVAL_MS, visibilityMode: Pool
 }
 
 export function useSinglePoolData(poolAddress?: string, intervalMs = 15_000) {
-  const { pools, isLoading, error, secondsAgo, refetch } = usePoolsData(intervalMs, 'unresolved');
-  const { pools: activePools } = usePoolsData(intervalMs, 'active');
-  const allPools = [...activePools, ...pools];
-  const pool = poolAddress ? allPools.find((p) => p.address.toLowerCase() === poolAddress.toLowerCase()) : activePools[0] ?? null;
+  const { pools, isLoading, error, secondsAgo, refetch } = usePoolsData(intervalMs, 'all');
+  const pool = poolAddress ? pools.find((p) => p.address.toLowerCase() === poolAddress.toLowerCase()) : pools.find((p) => p.visibility === 'active') ?? null;
   return { pool: pool ?? null, isLoading, error, secondsAgo, refetch };
 }
