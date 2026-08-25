@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getPools, ROBINHOOD_CHAIN_ID, ROBINHOOD_SUBGRAPH_URL, toLivePool } from '@/lib/robinhoodSubgraph';
-import { fetchGeckoPoolMarketData } from '@/lib/geckoTerminal';
+import { fetchGeckoPoolMarketData, fetchGeckoTokenPrices } from '@/lib/geckoTerminal';
 import { fetchGmgnTokenData } from '@/lib/gmgn';
 import { getOpportunityScore } from '@/lib/opportunityScore';
 import { fetchTokenMetadata, resolveTokenLabel, resolveTokenName } from '@/lib/tokenMetadata';
@@ -13,6 +13,8 @@ const MAX_GMGN_TOKENS = 80;
 function poolAddress(id: string): string { const separator = id.indexOf(':'); return (separator >= 0 ? id.slice(separator + 1) : id).toLowerCase(); }
 function tokenAddress(value: string | null | undefined): string { return String(value || '').trim().toLowerCase(); }
 function gmgnPoolMatches(gmgnPool: string | null, pool: string): boolean { return Boolean(gmgnPool && gmgnPool.toLowerCase() === pool.toLowerCase()); }
+function positive(value: number | null | undefined): number | null { return value != null && Number.isFinite(value) && value > 0 ? value : null; }
+function reserveAmount(value: string | null | undefined): number { try { if (!value || !/^\d+$/.test(value)) return 0; return Number(BigInt(value)) / 1e18; } catch { return 0; } }
 
 export async function GET() {
   try {
@@ -31,9 +33,10 @@ export async function GET() {
     });
     const gmgnAddresses = Array.from(new Set([...priorityTokens, ...tokenAddresses])).filter(Boolean).slice(0, MAX_GMGN_TOKENS);
 
-    const [gmgn, tokenMetadata] = await Promise.all([
+    const [gmgn, tokenMetadata, geckoTokenPrices] = await Promise.all([
       fetchGmgnTokenData(gmgnAddresses),
       fetchTokenMetadata(tokenAddresses),
+      fetchGeckoTokenPrices(Array.from(new Set(priorityTokens))),
     ]);
 
     const pools = sourcePools.map((sourcePool) => {
@@ -52,7 +55,17 @@ export async function GET() {
       const gmgnPoolB = gmgnPoolMatches(gmgnB?.biggestPoolAddress ?? null, address) ? gmgnB : null;
       const poolMatchedGmgn = gmgnPoolA || gmgnPoolB;
 
-      const tvl = marketData?.reserveUsd ?? base.tvl ?? poolMatchedGmgn?.liquidityUsd ?? null;
+      const tokenXPrice = positive(marketData?.baseTokenPriceUsd) ?? positive(gmgnA?.priceUsd) ?? geckoTokenPrices.byToken.get(tokenX) ?? null;
+      const tokenYPrice = positive(marketData?.quoteTokenPriceUsd) ?? positive(gmgnB?.priceUsd) ?? geckoTokenPrices.byToken.get(tokenY) ?? null;
+      const reserveX = reserveAmount(sourcePool.reserveX);
+      const reserveY = reserveAmount(sourcePool.reserveY);
+      const computedTvl = tokenXPrice !== null && tokenYPrice !== null && (reserveX > 0 || reserveY > 0) ? (reserveX * tokenXPrice) + (reserveY * tokenYPrice) : null;
+
+      // Prefer exact pool-level market data. If GeckoTerminal has no pool
+      // record, calculate TVL only from the pool's own reserves and independently
+      // sourced current token prices. This never substitutes token liquidity for
+      // pool liquidity.
+      const tvl = marketData?.reserveUsd ?? positive(base.tvl) ?? computedTvl ?? poolMatchedGmgn?.liquidityUsd ?? null;
       const volume24h = marketData?.volume24h ?? poolMatchedGmgn?.volume24h ?? null;
       const volumeToTVL = tvl !== null && tvl > 0 && volume24h !== null ? volume24h / tvl : null;
       const feePct = (Number(sourcePool.binStep) || 0) * 0.01;
@@ -66,7 +79,7 @@ export async function GET() {
         ...base,
         pair: `${tokenA}/${tokenB}`,
         tokenA, tokenB, tokenAName, tokenBName, address, tvl,
-        currentPrice: marketData?.baseTokenPriceUsd ?? gmgnA?.priceUsd ?? gmgnB?.priceUsd ?? base.currentPrice,
+        currentPrice: marketData?.baseTokenPriceUsd ?? gmgnA?.priceUsd ?? geckoTokenPrices.byToken.get(tokenX) ?? base.currentPrice,
         priceChange24h: priceMove24h,
         volume1h: marketData?.volume1h ?? null,
         volume6h: marketData?.volume6h ?? null,
@@ -91,15 +104,19 @@ export async function GET() {
       pools,
       dataQuality: {
         poolSource: 'Robinhood Chain DLMM subgraph',
-        marketSource: 'GeckoTerminal pool multi endpoint with exact-pool GMGN fallback',
+        marketSource: 'GeckoTerminal pool multi endpoint with verified token-price fallback for uncovered pools',
         volumeSource: 'GeckoTerminal pool data; GMGN only when its largest identified pool matches the requested pool',
         tokenSource: 'Robinhood asset registry + Blockscout + GMGN + DLMM subgraph fallback',
+        tvlFallback: 'Pool reserves × independently sourced token USD prices; only used when pool-level TVL is unavailable',
         gmgnEnabled: gmgn.configured,
         gmgnTokensAttempted: gmgn.tokensAttempted,
         gmgnTokensReturned: gmgn.tokensReturned,
         gmgnCoveragePct: gmgn.tokensAttempted > 0 ? Number(((gmgn.tokensReturned / gmgn.tokensAttempted) * 100).toFixed(1)) : 0,
         gmgnTokenBudget: MAX_GMGN_TOKENS,
         verifiedTokenMetadataCount: tokenMetadata.size,
+        geckoTokenPriceCount: geckoTokenPrices.byToken.size,
+        geckoTokenPriceBatchesSucceeded: geckoTokenPrices.batchesSucceeded,
+        geckoTokenPriceBatchesAttempted: geckoTokenPrices.batchesAttempted,
         volumeWindowSeconds: 86_400,
         volumeComplete: market.complete,
         poolsDiscovered: sourcePools.length,
@@ -107,7 +124,7 @@ export async function GET() {
         poolsMissingPrimaryMarketData: missingPoolAddresses.size,
         geckoBatchesSucceeded: market.batchesSucceeded,
         geckoBatchesAttempted: market.batchesAttempted,
-        note: 'Price, liquidity, volume and swaps prefer verified pool-level GeckoTerminal data. GMGN token data is used for targeted enrichment and only exact-pool liquidity/volume/swap fallback. 24h volatility is displayed as absolute 24h price movement, not fabricated statistical volatility. APR is a simple 24h fee run-rate estimate.'
+        note: 'Pool-level GeckoTerminal data remains authoritative. Missing pool TVL may be reconstructed from that pool’s own reserves and current token prices; no token-wide liquidity value is substituted for pool TVL. 24h volatility is absolute price movement, not fabricated statistical volatility. APR is a simple 24h fee run-rate estimate.'
       },
       indexer: { status: 'live', lastIndexedBlock: 0, lastIndexedTimestamp: Date.now(), poolsDiscovered: pools.length, swapsIndexed: null, protocol: 'Robinhood DLMM', factoryAddress: null, subgraphEndpoint: ROBINHOOD_SUBGRAPH_URL, error: null },
       timestamp: Date.now(),
