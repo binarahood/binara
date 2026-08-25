@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getPools, ROBINHOOD_CHAIN_ID, ROBINHOOD_SUBGRAPH_URL, toLivePool } from '@/lib/robinhoodSubgraph';
 import { fetchGeckoPoolMarketData } from '@/lib/geckoTerminal';
+import { getOpportunityScore } from '@/lib/opportunityScore';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -22,8 +23,7 @@ export async function GET() {
       const tvl = base.tvl;
       const volume24h = marketData?.volume24h ?? null;
       const volumeToTVL = tvl !== null && tvl > 0 && volume24h !== null ? volume24h / tvl : null;
-
-      return {
+      const pool = {
         ...base,
         address,
         volume1h: marketData?.volume1h ?? null,
@@ -33,6 +33,11 @@ export async function GET() {
         volumeToTVL,
         swapCount1h: marketData?.swapCount1h ?? null,
         swapCount24h: marketData?.swapCount24h ?? null,
+      };
+
+      return {
+        ...pool,
+        analyticsScore: getOpportunityScore(pool),
       };
     });
 
