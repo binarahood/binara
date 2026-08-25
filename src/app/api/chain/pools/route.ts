@@ -3,6 +3,7 @@ import { getPools, ROBINHOOD_CHAIN_ID, ROBINHOOD_SUBGRAPH_URL, toLivePool } from
 import { fetchGeckoPoolMarketData } from '@/lib/geckoTerminal';
 import { fetchGmgnTokenData } from '@/lib/gmgn';
 import { getOpportunityScore } from '@/lib/opportunityScore';
+import { fetchTokenMetadata, resolveTokenLabel, resolveTokenName } from '@/lib/tokenMetadata';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -28,9 +29,10 @@ export async function GET() {
       sourcePools.flatMap((pool) => [tokenAddress(pool.tokenX), tokenAddress(pool.tokenY)]).filter(Boolean),
     ));
 
-    const [market, gmgn] = await Promise.all([
+    const [market, gmgn, tokenMetadata] = await Promise.all([
       fetchGeckoPoolMarketData(poolAddresses),
       fetchGmgnTokenData(tokenAddresses),
+      fetchTokenMetadata(tokenAddresses),
     ]);
 
     const pools = sourcePools.map((sourcePool) => {
@@ -42,8 +44,10 @@ export async function GET() {
       const gmgnA = tokenX ? gmgn.byToken.get(tokenX) ?? null : null;
       const gmgnB = tokenY ? gmgn.byToken.get(tokenY) ?? null : null;
 
-      const tokenA = tokenSymbol(gmgnA?.symbol, base.tokenA);
-      const tokenB = tokenSymbol(gmgnB?.symbol, base.tokenB);
+      const tokenA = resolveTokenLabel(tokenX, tokenMetadata, base.tokenA, gmgnA?.symbol);
+      const tokenB = resolveTokenLabel(tokenY, tokenMetadata, base.tokenB, gmgnB?.symbol);
+      const tokenAName = resolveTokenName(tokenX, tokenMetadata);
+      const tokenBName = resolveTokenName(tokenY, tokenMetadata);
       const tvl = base.tvl ?? gmgnA?.liquidityUsd ?? gmgnB?.liquidityUsd ?? null;
       const volume24h = marketData?.volume24h ?? gmgnA?.volume24h ?? gmgnB?.volume24h ?? null;
       const volumeToTVL = tvl !== null && tvl > 0 && volume24h !== null ? volume24h / tvl : null;
@@ -54,6 +58,8 @@ export async function GET() {
         pair: `${tokenA}/${tokenB}`,
         tokenA,
         tokenB,
+        tokenAName,
+        tokenBName,
         address,
         tvl,
         currentPrice: gmgnA?.priceUsd ?? gmgnB?.priceUsd ?? base.currentPrice,
@@ -81,18 +87,17 @@ export async function GET() {
       dataQuality: {
         poolSource: 'Robinhood Chain DLMM subgraph',
         volumeSource: 'GeckoTerminal pool market data with GMGN token fallback',
-        tokenSource: gmgn.configured ? 'GMGN token info + Robinhood DLMM subgraph' : 'Robinhood DLMM subgraph',
+        tokenSource: 'Robinhood asset registry + Blockscout + GMGN + DLMM subgraph fallback',
         gmgnEnabled: gmgn.configured,
         gmgnTokensAttempted: gmgn.tokensAttempted,
         gmgnTokensReturned: gmgn.tokensReturned,
         gmgnCoveragePct: gmgn.tokensAttempted > 0 ? Number(((gmgn.tokensReturned / gmgn.tokensAttempted) * 100).toFixed(1)) : 0,
+        verifiedTokenMetadataCount: tokenMetadata.size,
         volumeWindowSeconds: 86_400,
         volumeComplete: market.complete,
         poolsDiscovered: sourcePools.length,
         poolsWithMarketData: market.poolsReturned,
-        note: gmgn.configured
-          ? 'GMGN enriches token metadata, price, liquidity, holders, smart-money and risk fields. Existing pool TVL remains authoritative when verified.'
-          : 'Set GMGN_API_KEY in Vercel to enable GMGN enrichment. Existing verified pool data remains the primary source.',
+        note: 'Pool labels prefer GMGN symbols when available, then Robinhood Chain asset metadata, Blockscout token metadata, and finally the verified subgraph fallback. No address is presented as a token symbol unless all metadata sources fail.',
       },
       indexer: {
         status: 'live',
