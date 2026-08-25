@@ -1,6 +1,8 @@
 const GMGN_HOST = 'https://openapi.gmgn.ai';
 const GMGN_TIMEOUT_MS = 6_000;
 const GMGN_CHAIN = 'robinhood';
+const GMGN_CONCURRENCY = 8;
+const GMGN_BATCH_DELAY_MS = 450;
 
 export interface GmgnTokenData {
   address: string;
@@ -25,6 +27,7 @@ interface GmgnEnvelope {
   data?: unknown;
   message?: string;
   error?: string;
+  reset_at?: number | string;
 }
 
 function finite(value: unknown): number | null {
@@ -48,6 +51,12 @@ function extractData(envelope: GmgnEnvelope): Record<string, unknown> | null {
   const data = asRecord(envelope.data);
   if (data) return data;
   return null;
+}
+
+function isRateLimited(response: Response, envelope: GmgnEnvelope | null): boolean {
+  if (response.status === 429) return true;
+  const error = String(envelope?.error || '').toUpperCase();
+  return error === 'RATE_LIMIT_EXCEEDED' || error === 'RATE_LIMIT_BANNED';
 }
 
 export function isGmgnConfigured(): boolean {
@@ -75,8 +84,18 @@ async function fetchToken(address: string): Promise<GmgnTokenData | null> {
       cache: 'no-store',
       signal: controller.signal,
     });
-    if (!response.ok) return null;
-    const envelope = await response.json() as GmgnEnvelope;
+
+    let envelope: GmgnEnvelope | null = null;
+    try {
+      envelope = await response.json() as GmgnEnvelope;
+    } catch {
+      return null;
+    }
+
+    // Do not hammer a temporary GMGN cooldown. The caller will continue with
+    // the remaining addresses and surface the number of successful enrichments.
+    if (!response.ok || isRateLimited(response, envelope)) return null;
+
     const data = extractData(envelope);
     if (!data) return null;
 
@@ -112,14 +131,33 @@ export async function fetchGmgnTokenData(addresses: string[]): Promise<{
   byToken: Map<string, GmgnTokenData>;
   configured: boolean;
   tokensReturned: number;
+  tokensAttempted: number;
 }> {
-  const unique = Array.from(new Set(addresses.map((address) => address.toLowerCase())));
-  if (!unique.length || !isGmgnConfigured()) return { byToken: new Map(), configured: isGmgnConfigured(), tokensReturned: 0 };
+  const unique = Array.from(new Set(addresses.map((address) => address.toLowerCase()).filter(Boolean)));
+  const configured = isGmgnConfigured();
+  if (!unique.length || !configured) {
+    return { byToken: new Map(), configured, tokensReturned: 0, tokensAttempted: 0 };
+  }
 
-  // GMGN's documented token-info route is low weight, but keep concurrency
-  // conservative because a pool list contains repeated token addresses.
-  const results = await Promise.all(unique.map(fetchToken));
   const byToken = new Map<string, GmgnTokenData>();
-  for (const item of results) if (item) byToken.set(item.address, item);
-  return { byToken, configured: true, tokensReturned: byToken.size };
+
+  // GMGN documents a leaky-bucket limit of 20 requests/sec with a burst
+  // capacity of 20 for token-info. Keep concurrency and pacing conservative so
+  // a 100+ token pool snapshot does not immediately trigger a 429 cooldown.
+  for (let offset = 0; offset < unique.length; offset += GMGN_CONCURRENCY) {
+    const batch = unique.slice(offset, offset + GMGN_CONCURRENCY);
+    const results = await Promise.all(batch.map(fetchToken));
+    for (const item of results) if (item) byToken.set(item.address, item);
+
+    if (offset + GMGN_CONCURRENCY < unique.length) {
+      await new Promise((resolve) => setTimeout(resolve, GMGN_BATCH_DELAY_MS));
+    }
+  }
+
+  return {
+    byToken,
+    configured: true,
+    tokensReturned: byToken.size,
+    tokensAttempted: unique.length,
+  };
 }
