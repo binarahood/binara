@@ -25,7 +25,7 @@ const navGroups: NavGroup[] = [
   ] },
   { title: 'Tools', items: [
     { label: 'Analytics', href: '/analytics', icon: 'PresentationChartLineIcon' },
-    { label: 'Scanner', href: '/scanner', icon: 'SignalIcon' },
+    { label: 'Opportunity Scanner', href: '/scanner', icon: 'SignalIcon' },
   ] },
   { title: 'System', items: [{ label: 'Settings', href: '/settings', icon: 'Cog6ToothIcon', isDemo: true }] },
 ];
@@ -41,7 +41,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const statusLabel = chainStatus.status === 'live' ? 'Robinhood Chain' : chainStatus.status === 'error' ? 'Connection Error' : chainStatus.status === 'stale' ? 'Stale Data' : 'Connecting…';
 
   return <aside className={`fixed left-0 top-0 h-full z-40 flex flex-col bg-card border-r border-border transition-all duration-300 ease-in-out ${collapsed ? 'w-16' : 'w-60'}`}>
-    <div className={`flex items-center h-20 border-b border-border px-3 justify-center`}><AppLogo width={collapsed ? 40 : 150} height={collapsed ? 40 : 40} src="/assets/binara-wordmark.svg" className="flex-shrink-0" /></div>
+    <div className="flex items-center h-20 border-b border-border px-3 justify-center"><AppLogo width={collapsed ? 40 : 150} height={collapsed ? 40 : 40} src="/assets/binara-wordmark.svg" className="flex-shrink-0" /></div>
     {!collapsed && <div className={`mx-3 mt-3 px-3 py-2 rounded-lg border flex items-center gap-2 ${statusColor}`}><div className={dotColor} /><span className="text-xs font-medium">{statusLabel}</span>{chainStatus.status === 'live' && <span className="ml-auto text-xs text-muted-foreground font-mono-nums">4663</span>}</div>}
     {collapsed && <div className="flex justify-center mt-3"><div className={dotColor} /></div>}
     <nav className="flex-1 overflow-y-auto py-3 px-2">
