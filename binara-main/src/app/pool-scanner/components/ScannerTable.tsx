@@ -7,6 +7,12 @@ import Icon from '@/components/ui/AppIcon';
 
 type SortKey = 'analyticsScore' | 'tvl' | 'volume24h' | 'volumeToTVL' | 'swapCount24h' | 'createdAt';
 
+const KNOWN_TOKEN_NAMES: Record<string, string> = {
+  '0x6245e67affa44a23077f0ea7f981a8dc743a0c47': 'FRONG',
+  '0x0bd7d308f8e1639fab988df18a8011f41eacad73': 'WETH',
+  '0x5fc5360d0400a0fd4f2af552add042d716f1d168': 'USDG',
+};
+
 function getSortValue(pool: LivePool, key: SortKey): number {
   if (key === 'analyticsScore') return pool.analyticsScore ?? -1;
   if (key === 'tvl') return pool.tvl ?? -1;
@@ -28,9 +34,17 @@ function scoreClass(score: number | null) {
   return 'bg-negative-subtle text-negative';
 }
 
+function tokenLabel(address: string | null | undefined, fallback: string | null | undefined) {
+  if (address) {
+    const known = KNOWN_TOKEN_NAMES[address.toLowerCase()];
+    if (known) return known;
+  }
+  return fallback || (address ? shortAddress(address) : null);
+}
+
 function displayPair(pool: LivePool) {
-  const a = pool.tokenAName || pool.tokenA || shortAddress(pool.tokenAAddress);
-  const b = pool.tokenBName || pool.tokenB || shortAddress(pool.tokenBAddress);
+  const a = tokenLabel(pool.tokenAAddress, pool.tokenAName || pool.tokenA);
+  const b = tokenLabel(pool.tokenBAddress, pool.tokenBName || pool.tokenB);
   return a && b ? `${a} / ${b}` : pool.pair || 'Unknown Pool';
 }
 
