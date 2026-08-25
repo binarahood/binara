@@ -28,41 +28,15 @@ function DataStatusBadge() {
   }, [chainStatus.lastUpdated]);
 
   if (chainStatus.status === 'connecting') {
-    return (
-      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-muted/40 border border-border">
-        <div className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse" />
-        <span className="text-xs text-muted-foreground font-semibold">CONNECTING</span>
-      </div>
-    );
+    return <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-muted/40 border border-border"><div className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse" /><span className="text-[10px] sm:text-xs text-muted-foreground font-semibold">CONNECTING</span></div>;
   }
-
   if (chainStatus.status === 'error') {
-    return (
-      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-destructive/10 border border-destructive" title={chainStatus.error ?? undefined}>
-        <div className="w-2 h-2 rounded-full bg-destructive" />
-        <span className="text-xs text-destructive font-semibold">DATA CONNECTION ERROR</span>
-      </div>
-    );
+    return <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-destructive/10 border border-destructive" title={chainStatus.error ?? undefined}><div className="w-2 h-2 rounded-full bg-destructive" /><span className="text-[10px] sm:text-xs text-destructive font-semibold">ERROR</span></div>;
   }
-
   if (chainStatus.status === 'stale') {
-    return (
-      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-warning-subtle border border-warning">
-        <div className="w-2 h-2 rounded-full bg-warning" />
-        <span className="text-xs text-warning font-semibold">STALE DATA</span>
-      </div>
-    );
+    return <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-warning-subtle border border-warning"><div className="w-2 h-2 rounded-full bg-warning" /><span className="text-[10px] sm:text-xs text-warning font-semibold">STALE</span></div>;
   }
-
-  // live
-  return (
-    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-positive-subtle border border-positive/30">
-      <div className="live-dot" />
-      <span className="text-xs text-positive font-semibold">
-        LIVE{secondsAgo !== null ? ` • Updated ${secondsAgo}s ago` : ' DATA'}
-      </span>
-    </div>
-  );
+  return <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-positive-subtle border border-positive/30"><div className="live-dot" /><span className="text-[10px] sm:text-xs text-positive font-semibold">LIVE<span className="hidden sm:inline">{secondsAgo !== null ? ` • Updated ${secondsAgo}s ago` : ' DATA'}</span></span></div>;
 }
 
 export default function Topbar() {
@@ -71,245 +45,64 @@ export default function Topbar() {
   const dropdownRef = useRef<HTMLDivElement>(null);
   const { chainStatus } = useChainStatus();
 
-  const {
-    isConnected,
-    isConnecting,
-    account,
-    chainId,
-    isCorrectChain,
-    ethBalance,
-    tokenBalances,
-    lpPositions,
-    isSwitchingChain,
-    isLoadingBalances,
-    error,
-    connect,
-    disconnect,
-    switchToRobinhoodChain,
-  } = useWallet();
+  const { isConnected, isConnecting, account, chainId, isCorrectChain, ethBalance, tokenBalances, lpPositions, isSwitchingChain, isLoadingBalances, error, connect, disconnect, switchToRobinhoodChain } = useWallet();
 
-  // Close dropdown on outside click
   useEffect(() => {
     function handleClick(e: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setWalletOpen(false);
-      }
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) setWalletOpen(false);
     }
     if (walletOpen) document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [walletOpen]);
 
   return (
-    <header className="h-16 flex items-center justify-between px-6 border-b border-border bg-card/80 backdrop-blur-sm sticky top-0 z-30">
-      {/* Left: breadcrumb / page context */}
-      <div className="flex items-center gap-2 text-sm">
-        <span className="text-muted-foreground">BINARA</span>
-        <Icon name="ChevronRightIcon" size={14} className="text-muted-foreground/50" />
-        <span className="text-foreground font-medium">Analytics Terminal</span>
-        <span className="ml-2">
-          <DataStatusBadge />
-        </span>
+    <header className="h-14 sm:h-16 flex items-center justify-between gap-2 px-3 sm:px-6 border-b border-border bg-card/80 backdrop-blur-sm sticky top-0 z-30 min-w-0">
+      <div className="flex items-center gap-1.5 sm:gap-2 text-sm min-w-0 overflow-hidden">
+        <span className="hidden sm:inline text-muted-foreground">BINARA</span>
+        <Icon name="ChevronRightIcon" size={14} className="hidden sm:block text-muted-foreground/50" />
+        <span className="text-foreground font-medium truncate">Analytics Terminal</span>
+        <span className="ml-1 sm:ml-2 flex-shrink-0"><DataStatusBadge /></span>
       </div>
 
-      {/* Right: actions */}
-      <div className="flex items-center gap-2">
-        {/* Search */}
-        <button
-          suppressHydrationWarning
-          onClick={() => setSearchOpen(!searchOpen)}
-          className="btn-ghost"
-          title="Search pools (Cmd+K)"
-        >
+      <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+        <button suppressHydrationWarning onClick={() => setSearchOpen(!searchOpen)} className="btn-ghost px-2 sm:px-3" title="Search pools (Cmd+K)">
           <Icon name="MagnifyingGlassIcon" size={16} />
-          {!searchOpen && (
-            <span className="hidden md:flex items-center gap-1 text-xs text-muted-foreground/60">
-              <kbd className="px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-xs">⌘K</kbd>
-            </span>
-          )}
+          {!searchOpen && <span className="hidden md:flex items-center gap-1 text-xs text-muted-foreground/60"><kbd className="px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-xs">⌘K</kbd></span>}
         </button>
 
-        {/* Notifications */}
-        <button suppressHydrationWarning className="btn-ghost relative" title="Alerts (2 active)">
+        <button suppressHydrationWarning className="btn-ghost px-2 sm:px-3 relative" title="Alerts (2 active)">
           <Icon name="BellIcon" size={16} />
           <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-warning" />
         </button>
 
-        {/* Block height */}
-        {chainStatus.blockNumber && (
-          <div className="hidden xl:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted/40 border border-border">
-            <Icon name="CubeIcon" size={12} className="text-muted-foreground" />
-            <span className="text-xs text-muted-foreground font-mono-nums">
-              #{chainStatus.blockNumber.toLocaleString()}
-            </span>
-          </div>
-        )}
+        {chainStatus.blockNumber && <div className="hidden xl:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted/40 border border-border"><Icon name="CubeIcon" size={12} className="text-muted-foreground" /><span className="text-xs text-muted-foreground font-mono-nums">#{chainStatus.blockNumber.toLocaleString()}</span></div>}
 
-        {/* Wrong network banner */}
         {isConnected && !isCorrectChain && (
-          <button
-            suppressHydrationWarning
-            onClick={switchToRobinhoodChain}
-            disabled={isSwitchingChain}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-destructive/10 border border-destructive text-destructive text-xs font-semibold hover:bg-destructive/20 transition-colors disabled:opacity-60"
-            title={`Wrong network (chain ${chainId}). Click to switch to Robinhood Chain (4663)`}
-          >
-            <Icon name="ExclamationTriangleIcon" size={13} />
-            <span className="hidden sm:inline">
-              {isSwitchingChain ? 'Switching…' : 'Wrong Network'}
-            </span>
+          <button suppressHydrationWarning onClick={switchToRobinhoodChain} disabled={isSwitchingChain} className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg bg-destructive/10 border border-destructive text-destructive text-xs font-semibold disabled:opacity-60" title={`Wrong network (chain ${chainId}). Click to switch to Robinhood Chain (4663)`}>
+            <Icon name="ExclamationTriangleIcon" size={13} /><span className="hidden sm:inline">{isSwitchingChain ? 'Switching…' : 'Wrong Network'}</span>
           </button>
         )}
 
-        {/* Wallet button / dropdown */}
         {!isConnected ? (
-          <button
-            suppressHydrationWarning
-            onClick={connect}
-            disabled={isConnecting}
-            className="btn-primary text-xs px-3 py-1.5 disabled:opacity-60"
-          >
-            <Icon name="WalletIcon" size={14} />
-            <span className="hidden sm:inline">
-              {isConnecting ? 'Connecting…' : 'Connect Wallet'}
-            </span>
+          <button suppressHydrationWarning onClick={connect} disabled={isConnecting} className="btn-primary text-xs px-2.5 sm:px-3 py-1.5 disabled:opacity-60">
+            <Icon name="WalletIcon" size={14} /><span className="hidden sm:inline">{isConnecting ? 'Connecting…' : 'Connect Wallet'}</span>
           </button>
         ) : (
           <div className="relative" ref={dropdownRef}>
-            <button
-              suppressHydrationWarning
-              onClick={() => setWalletOpen((v) => !v)}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${
-                isCorrectChain
-                  ? 'bg-positive-subtle border-positive text-positive hover:bg-positive/20' :'bg-muted/40 border-border text-muted-foreground hover:bg-muted/60'
-              }`}
-            >
+            <button suppressHydrationWarning onClick={() => setWalletOpen((v) => !v)} className={`flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${isCorrectChain ? 'bg-positive-subtle border-positive text-positive hover:bg-positive/20' : 'bg-muted/40 border-border text-muted-foreground hover:bg-muted/60'}`}>
               <span className={`w-2 h-2 rounded-full flex-shrink-0 ${isCorrectChain ? 'bg-positive' : 'bg-muted-foreground'}`} />
               <span className="hidden sm:inline font-mono-nums">{shortenAddress(account!)}</span>
               <Icon name="ChevronDownIcon" size={12} />
             </button>
 
-            {/* Wallet dropdown panel */}
             {walletOpen && (
-              <div className="absolute right-0 top-full mt-2 w-80 rounded-xl bg-card border border-border shadow-2xl z-50 overflow-hidden">
-                {/* Header */}
-                <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-0.5">Connected Account</p>
-                    <p className="text-sm font-mono-nums text-foreground font-semibold">
-                      {shortenAddress(account!)}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xs text-muted-foreground mb-0.5">Network</p>
-                    {isCorrectChain ? (
-                      <span className="text-xs font-semibold text-positive flex items-center gap-1 justify-end">
-                        <span className="w-1.5 h-1.5 rounded-full bg-positive inline-block" />
-                        Robinhood Chain
-                      </span>
-                    ) : (
-                      <span className="text-xs font-semibold text-destructive">Chain {chainId}</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* ETH Balance */}
-                <div className="px-4 py-3 border-b border-border">
-                  <p className="text-xs text-muted-foreground mb-1">ETH Balance</p>
-                  {isLoadingBalances ? (
-                    <div className="h-5 w-24 rounded bg-muted animate-pulse" />
-                  ) : (
-                    <p className="text-lg font-bold text-foreground font-mono-nums">
-                      {formatEth(ethBalance)}
-                    </p>
-                  )}
-                </div>
-
-                {/* Token Balances */}
-                {tokenBalances.length > 0 && (
-                  <div className="px-4 py-3 border-b border-border">
-                    <p className="text-xs text-muted-foreground mb-2">Token Balances</p>
-                    {isLoadingBalances ? (
-                      <div className="space-y-2">
-                        {[1, 2].map((i) => (
-                          <div key={i} className="h-4 rounded bg-muted animate-pulse" />
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="space-y-1.5">
-                        {tokenBalances.map((t) => (
-                          <div key={t.symbol} className="flex items-center justify-between">
-                            <span className="text-xs font-semibold text-foreground">{t.symbol}</span>
-                            <div className="text-right">
-                              <span className="text-xs font-mono-nums text-foreground">{t.balance}</span>
-                              {t.usdValue !== undefined && (
-                                <span className="text-xs text-muted-foreground ml-1.5">
-                                  ${t.usdValue.toLocaleString()}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* LP Positions */}
-                <div className="px-4 py-3 border-b border-border">
-                  <p className="text-xs text-muted-foreground mb-2">
-                    LP Positions
-                    <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-primary/20 text-primary text-xs font-semibold">
-                      {lpPositions.length}
-                    </span>
-                  </p>
-                  {isLoadingBalances ? (
-                    <div className="space-y-2">
-                      {[1, 2].map((i) => (
-                        <div key={i} className="h-10 rounded bg-muted animate-pulse" />
-                      ))}
-                    </div>
-                  ) : lpPositions.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">No LP positions found</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {lpPositions.map((pos) => (
-                        <div
-                          key={pos.poolAddress}
-                          className="flex items-center justify-between p-2 rounded-lg bg-muted/40 border border-border"
-                        >
-                          <div>
-                            <p className="text-xs font-semibold text-foreground">{pos.pair}</p>
-                            <p className="text-xs text-muted-foreground">{pos.fee}% fee</p>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-xs font-mono-nums text-foreground font-semibold">
-                              ${pos.usdValue.toLocaleString()}
-                            </p>
-                            <span
-                              className={`text-xs font-medium ${
-                                pos.inRange ? 'text-positive' : 'text-warning'
-                              }`}
-                            >
-                              {pos.inRange ? '● In Range' : '○ Out of Range'}
-                            </span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Disconnect */}
-                <div className="px-4 py-3">
-                  <button
-                    suppressHydrationWarning
-                    onClick={() => { disconnect(); setWalletOpen(false); }}
-                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-destructive/10 border border-destructive/30 text-destructive text-xs font-semibold hover:bg-destructive/20 transition-colors"
-                  >
-                    <Icon name="ArrowRightOnRectangleIcon" size={13} />
-                    Disconnect Wallet
-                  </button>
-                </div>
+              <div className="absolute right-0 top-full mt-2 w-[calc(100vw-1.5rem)] max-w-80 rounded-xl bg-card border border-border shadow-2xl z-50 overflow-hidden">
+                <div className="px-4 py-3 border-b border-border flex items-center justify-between"><div><p className="text-xs text-muted-foreground mb-0.5">Connected Account</p><p className="text-sm font-mono-nums text-foreground font-semibold">{shortenAddress(account!)}</p></div><div className="text-right"><p className="text-xs text-muted-foreground mb-0.5">Network</p>{isCorrectChain ? <span className="text-xs font-semibold text-positive flex items-center gap-1 justify-end"><span className="w-1.5 h-1.5 rounded-full bg-positive inline-block" />Robinhood Chain</span> : <span className="text-xs font-semibold text-destructive">Chain {chainId}</span>}</div></div>
+                <div className="px-4 py-3 border-b border-border"><p className="text-xs text-muted-foreground mb-1">ETH Balance</p>{isLoadingBalances ? <div className="h-5 w-24 rounded bg-muted animate-pulse" /> : <p className="text-lg font-bold text-foreground font-mono-nums">{formatEth(ethBalance)}</p>}</div>
+                {tokenBalances.length > 0 && <div className="px-4 py-3 border-b border-border"><p className="text-xs text-muted-foreground mb-2">Token Balances</p>{isLoadingBalances ? <div className="space-y-2">{[1, 2].map((i) => <div key={i} className="h-4 rounded bg-muted animate-pulse" />)}</div> : <div className="space-y-1.5">{tokenBalances.map((t) => <div key={t.symbol} className="flex items-center justify-between"><span className="text-xs font-semibold text-foreground">{t.symbol}</span><div className="text-right"><span className="text-xs font-mono-nums text-foreground">{t.balance}</span>{t.usdValue !== undefined && <span className="text-xs text-muted-foreground ml-1.5">${t.usdValue.toLocaleString()}</span>}</div></div>)}</div>}</div>}
+                <div className="px-4 py-3 border-b border-border"><p className="text-xs text-muted-foreground mb-2">LP Positions</p>{lpPositions.length === 0 ? <p className="text-xs text-muted-foreground">No active positions.</p> : <div className="space-y-2">{lpPositions.slice(0, 3).map((p) => <div key={p.poolAddress} className="rounded-lg bg-muted/30 p-2"><p className="text-xs font-mono text-foreground truncate">{p.poolAddress}</p></div>)}</div>}</div>
+                {error && <div className="px-4 py-3 border-b border-border"><p className="text-xs text-destructive">{error}</p></div>}
+                <div className="p-3"><button suppressHydrationWarning onClick={() => { disconnect(); setWalletOpen(false); }} className="w-full btn-secondary text-xs">Disconnect Wallet</button></div>
               </div>
             )}
           </div>
