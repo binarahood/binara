@@ -8,6 +8,8 @@ export interface LivePool {
   pair: string;
   tokenA: string;
   tokenB: string;
+  tokenAName?: string | null;
+  tokenBName?: string | null;
   tokenAAddress: string;
   tokenBAddress: string;
   decimalsA: number;
