@@ -65,27 +65,45 @@ declare global {
   }
 }
 
+const EMPTY_WALLET_STATE: WalletState = {
+  isConnected: false,
+  isConnecting: false,
+  account: null,
+  chainId: null,
+  isCorrectChain: false,
+  ethBalance: null,
+  tokenBalances: [],
+  lpPositions: [],
+  isSwitchingChain: false,
+  isLoadingBalances: false,
+  error: null,
+};
+
+// useWallet is consumed by both the global Topbar and page-level screens.
+// Keep one in-memory snapshot so navigation does not reset a page-level hook
+// to "disconnected" while the shared wallet is already connected.
+let sharedWalletState: WalletState = { ...EMPTY_WALLET_STATE };
+const walletSubscribers = new Set<(state: WalletState) => void>();
+
+function updateSharedWalletState(patch: Partial<WalletState>) {
+  sharedWalletState = { ...sharedWalletState, ...patch };
+  walletSubscribers.forEach((subscriber) => subscriber(sharedWalletState));
+}
+
+function resetSharedWalletState() {
+  sharedWalletState = { ...EMPTY_WALLET_STATE };
+  walletSubscribers.forEach((subscriber) => subscriber(sharedWalletState));
+}
+
 export function useWallet(): WalletState & {
   connect: () => Promise<void>;
   disconnect: () => void;
   switchToRobinhoodChain: () => Promise<void>;
 } {
-  const [state, setState] = useState<WalletState>({
-    isConnected: false,
-    isConnecting: false,
-    account: null,
-    chainId: null,
-    isCorrectChain: false,
-    ethBalance: null,
-    tokenBalances: [],
-    lpPositions: [],
-    isSwitchingChain: false,
-    isLoadingBalances: false,
-    error: null,
-  });
+  const [state, setState] = useState<WalletState>(() => ({ ...sharedWalletState }));
 
   const setPartial = useCallback((partial: Partial<WalletState>) => {
-    setState((prev) => ({ ...prev, ...partial }));
+    updateSharedWalletState(partial);
   }, []);
 
   const notifyWalletChanged = useCallback(() => {
@@ -96,12 +114,12 @@ export function useWallet(): WalletState & {
 
   const loadBalances = useCallback(async (account: string) => {
     if (!window.ethereum) return;
-    setPartial({ isLoadingBalances: true, error: null });
+    updateSharedWalletState({ isLoadingBalances: true, error: null });
     try {
       const res = await fetch(`/api/chain/wallet?address=${account}`, { cache: 'no-store' });
       const data = await res.json();
       if (!res.ok || data.error) {
-        setPartial({
+        updateSharedWalletState({
           isLoadingBalances: false,
           error: data.error || 'Unable to retrieve wallet data from Robinhood Chain.',
           tokenBalances: [],
@@ -109,7 +127,7 @@ export function useWallet(): WalletState & {
         });
         return;
       }
-      setPartial({
+      updateSharedWalletState({
         ethBalance: data.ethBalance ?? null,
         tokenBalances: data.tokenBalances ?? [],
         lpPositions: data.lpPositions ?? [],
@@ -117,42 +135,31 @@ export function useWallet(): WalletState & {
         error: null,
       });
     } catch {
-      setPartial({
+      updateSharedWalletState({
         isLoadingBalances: false,
         error: 'Unable to retrieve wallet data from Robinhood Chain.',
         tokenBalances: [],
         lpPositions: [],
       });
     }
-  }, [setPartial]);
+  }, []);
 
   const syncProviderState = useCallback(async () => {
     if (!window.ethereum) return;
     try {
       const accounts = (await window.ethereum.request({ method: 'eth_accounts' })) as string[];
       if (!accounts || accounts.length === 0) {
-        setState({
-          isConnected: false,
-          isConnecting: false,
-          account: null,
-          chainId: null,
-          isCorrectChain: false,
-          ethBalance: null,
-          tokenBalances: [],
-          lpPositions: [],
-          isSwitchingChain: false,
-          isLoadingBalances: false,
-          error: null,
-        });
+        resetSharedWalletState();
         return;
       }
 
       const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' }) as string;
       const id = parseInt(chainIdHex, 16);
       const account = accounts[0];
-      setPartial({
+      updateSharedWalletState({
         account,
         isConnected: true,
+        isConnecting: false,
         chainId: id,
         isCorrectChain: id === ROBINHOOD_CHAIN_ID,
       });
@@ -160,45 +167,39 @@ export function useWallet(): WalletState & {
     } catch {
       // Provider can reject during wallet startup; keep the current UI state.
     }
-  }, [loadBalances, setPartial]);
+  }, [loadBalances]);
 
   const handleAccountsChanged = useCallback(
     (accounts: unknown) => {
       const accs = accounts as string[];
       if (!accs || accs.length === 0) {
-        setState({
-          isConnected: false,
-          isConnecting: false,
-          account: null,
-          chainId: null,
-          isCorrectChain: false,
-          ethBalance: null,
-          tokenBalances: [],
-          lpPositions: [],
-          isSwitchingChain: false,
-          isLoadingBalances: false,
-          error: null,
-        });
+        resetSharedWalletState();
       } else {
-        setPartial({ account: accs[0], isConnected: true });
+        updateSharedWalletState({ account: accs[0], isConnected: true, error: null });
         loadBalances(accs[0]);
       }
       notifyWalletChanged();
     },
-    [loadBalances, notifyWalletChanged, setPartial]
+    [loadBalances, notifyWalletChanged]
   );
 
   const handleChainChanged = useCallback(
     (chainIdHex: unknown) => {
       const id = parseInt(chainIdHex as string, 16);
-      setPartial({ chainId: id, isCorrectChain: id === ROBINHOOD_CHAIN_ID });
+      updateSharedWalletState({ chainId: id, isCorrectChain: id === ROBINHOOD_CHAIN_ID });
       notifyWalletChanged();
     },
-    [notifyWalletChanged, setPartial]
+    [notifyWalletChanged]
   );
 
   useEffect(() => {
-    if (typeof window === 'undefined' || !window.ethereum) return;
+    const onSharedState = (nextState: WalletState) => setState({ ...nextState });
+    walletSubscribers.add(onSharedState);
+    setState({ ...sharedWalletState });
+
+    if (typeof window === 'undefined' || !window.ethereum) {
+      return () => walletSubscribers.delete(onSharedState);
+    }
 
     syncProviderState();
     window.ethereum.on('accountsChanged', handleAccountsChanged);
@@ -211,6 +212,7 @@ export function useWallet(): WalletState & {
       window.ethereum?.removeListener('accountsChanged', handleAccountsChanged);
       window.ethereum?.removeListener('chainChanged', handleChainChanged);
       window.removeEventListener(WALLET_CHANGED_EVENT, onBinaraWalletChanged);
+      walletSubscribers.delete(onSharedState);
     };
   }, [handleAccountsChanged, handleChainChanged, syncProviderState]);
 
@@ -225,7 +227,7 @@ export function useWallet(): WalletState & {
       const chainIdHex = (await window.ethereum.request({ method: 'eth_chainId' })) as string;
       const id = parseInt(chainIdHex, 16);
       const account = accounts[0];
-      setPartial({
+      updateSharedWalletState({
         account,
         isConnected: true,
         chainId: id,
@@ -241,19 +243,7 @@ export function useWallet(): WalletState & {
   }, [loadBalances, notifyWalletChanged, setPartial]);
 
   const disconnect = useCallback(() => {
-    setState({
-      isConnected: false,
-      isConnecting: false,
-      account: null,
-      chainId: null,
-      isCorrectChain: false,
-      ethBalance: null,
-      tokenBalances: [],
-      lpPositions: [],
-      isSwitchingChain: false,
-      isLoadingBalances: false,
-      error: null,
-    });
+    resetSharedWalletState();
     notifyWalletChanged();
   }, [notifyWalletChanged]);
 
