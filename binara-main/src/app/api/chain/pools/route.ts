@@ -8,7 +8,7 @@ const RPC_URL = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robi
 const SUBGRAPH_URL = 'https://gateway.kingdom.dev/robinhood/subgraph/v1/graphql';
 const WETH_ADDRESS = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73';
 const USDG_ADDRESS = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
-const API_VERSION = '1.4-live-volume';
+const API_VERSION = '1.5-live-volume';
 
 async function rpcCall(method: string, params: unknown[] = []): Promise<string> {
   const res = await fetch(RPC_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), cache: 'no-store' });
@@ -25,9 +25,9 @@ async function subgraphQuery(query: string, variables: Record<string, unknown> =
   return body.data || {};
 }
 
-function priceFromBinId(binId: number | null, binStep: number): number | null {
-  if (binId === null || !Number.isFinite(binId) || !Number.isFinite(binStep)) return null;
-  return Math.pow(1 + binStep / 10_000, binId - 8_388_608);
+function poolAddress(id: string): string {
+  const separator = id.indexOf(':');
+  return (separator >= 0 ? id.slice(separator + 1) : id).toLowerCase();
 }
 
 function knownSymbol(address: string): string | null {
@@ -88,27 +88,27 @@ export async function GET() {
     const chainId = parseInt(chainHex, 16);
     if (chainId !== CHAIN_ID) return NextResponse.json({ apiVersion: API_VERSION, status: 'error', error: `Wrong chain. Expected ${CHAIN_ID}, got ${chainId}`, pools: [] }, { status: 502 });
 
-    // Pool-level market metrics are fetched from GeckoTerminal's verified DEX data API.
-    // We use the pool addresses discovered from the Ramses DLMM subgraph and never
-    // estimate volume from TVL, price, or another pool.
-    const market = await fetchGeckoPoolMarketData(poolRows.map((pool) => pool.id));
+    // Subgraph pool IDs are namespaced as "4663:0x...". GeckoTerminal expects
+    // the actual EVM address, so strip the chain namespace before querying.
+    const market = await fetchGeckoPoolMarketData(poolRows.map((pool) => poolAddress(pool.id)));
 
     const pools = poolRows.map((pool) => {
+      const address = poolAddress(pool.id);
       const tokenA = knownSymbol(pool.tokenX.id) || cleanSymbol(pool.tokenX.symbol);
       const tokenB = knownSymbol(pool.tokenY.id) || cleanSymbol(pool.tokenY.symbol);
-      const marketData = market.byPool.get(pool.id.toLowerCase());
+      const marketData = market.byPool.get(address);
       const tvl = pool.totalValueLockedUSD === null ? null : Number(pool.totalValueLockedUSD);
       const volume24h = marketData?.volume24h ?? null;
       const volumeToTVL = tvl !== null && tvl > 0 && volume24h !== null ? volume24h / tvl : null;
 
       return {
-        id: pool.id, address: pool.id,
+        id: pool.id, address,
         pair: `${tokenA || pool.tokenX.id.slice(0, 8)}/${tokenB || pool.tokenY.id.slice(0, 8)}`,
         tokenA: tokenA || null, tokenB: tokenB || null,
         tokenAAddress: pool.tokenX.id, tokenBAddress: pool.tokenY.id,
         decimalsA: pool.tokenX.decimals, decimalsB: pool.tokenY.decimals,
         protocol: 'Ramses DLMM',
-        currentPrice: priceFromBinId(pool.activeId, pool.binStep),
+        currentPrice: null,
         priceChange24h: null,
         binStep: pool.binStep, activeBin: pool.activeId,
         fee: null,
