@@ -8,7 +8,8 @@ const RPC_URL = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robi
 const SUBGRAPH_URL = 'https://gateway.kingdom.dev/robinhood/subgraph/v1/graphql';
 const WETH_ADDRESS = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73';
 const USDG_ADDRESS = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
-const API_VERSION = '1.5-live-volume';
+const API_VERSION = '1.6-live-pool-metadata';
+const ERC20_SYMBOL_SELECTOR = '0x95d89b41';
 
 async function rpcCall(method: string, params: unknown[] = []): Promise<string> {
   const res = await fetch(RPC_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), cache: 'no-store' });
@@ -41,6 +42,50 @@ function cleanSymbol(value: unknown): string | null {
   const symbol = String(value ?? '').trim();
   if (!symbol || symbol === 'UNKNOWN' || symbol === '???' || symbol.includes('…') || symbol.includes('...') || /^0x/i.test(symbol)) return null;
   return symbol;
+}
+
+function decodeSymbol(hex: string): string | null {
+  if (!hex || hex === '0x') return null;
+  try {
+    const bytes = hex.slice(2);
+    if (bytes.length >= 128) {
+      const offset = Number(BigInt(`0x${bytes.slice(0, 64)}`));
+      const lenStart = offset * 2;
+      const length = Number(BigInt(`0x${bytes.slice(lenStart, lenStart + 64)}`));
+      const data = bytes.slice(lenStart + 64, lenStart + 64 + length * 2);
+      const decoded = Buffer.from(data, 'hex').toString('utf8').replace(/\0/g, '').trim();
+      if (decoded) return decoded;
+    }
+    const bytes32 = Buffer.from(bytes.slice(0, 64), 'hex').toString('utf8').replace(/\0/g, '').trim();
+    return bytes32 || null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveTokenSymbols(addresses: string[]): Promise<Map<string, string>> {
+  const unique = Array.from(new Set(addresses.map((address) => address.toLowerCase())));
+  const symbols = new Map<string, string>();
+  for (const address of unique) {
+    const known = knownSymbol(address);
+    if (known) symbols.set(address, known);
+  }
+
+  const unresolved = unique.filter((address) => !symbols.has(address));
+  const concurrency = 12;
+  for (let i = 0; i < unresolved.length; i += concurrency) {
+    const batch = unresolved.slice(i, i + concurrency);
+    const results = await Promise.all(batch.map(async (address) => {
+      try {
+        const result = await rpcCall('eth_call', [{ to: address, data: ERC20_SYMBOL_SELECTOR }, 'latest']);
+        return { address, symbol: cleanSymbol(decodeSymbol(result)) };
+      } catch {
+        return { address, symbol: null };
+      }
+    }));
+    for (const item of results) if (item.symbol) symbols.set(item.address, item.symbol);
+  }
+  return symbols;
 }
 
 interface PoolRow {
@@ -88,23 +133,29 @@ export async function GET() {
     const chainId = parseInt(chainHex, 16);
     if (chainId !== CHAIN_ID) return NextResponse.json({ apiVersion: API_VERSION, status: 'error', error: `Wrong chain. Expected ${CHAIN_ID}, got ${chainId}`, pools: [] }, { status: 502 });
 
-    // Subgraph pool IDs are namespaced as "4663:0x...". GeckoTerminal expects
-    // the actual EVM address, so strip the chain namespace before querying.
-    const market = await fetchGeckoPoolMarketData(poolRows.map((pool) => poolAddress(pool.id)));
+    const addresses = poolRows.flatMap((pool) => [pool.tokenX.id, pool.tokenY.id]);
+    const [market, tokenSymbols] = await Promise.all([
+      fetchGeckoPoolMarketData(poolRows.map((pool) => poolAddress(pool.id))),
+      resolveTokenSymbols(addresses),
+    ]);
 
     const pools = poolRows.map((pool) => {
       const address = poolAddress(pool.id);
-      const tokenA = knownSymbol(pool.tokenX.id) || cleanSymbol(pool.tokenX.symbol);
-      const tokenB = knownSymbol(pool.tokenY.id) || cleanSymbol(pool.tokenY.symbol);
+      const tokenA = knownSymbol(pool.tokenX.id) || cleanSymbol(pool.tokenX.symbol) || tokenSymbols.get(pool.tokenX.id.toLowerCase()) || null;
+      const tokenB = knownSymbol(pool.tokenY.id) || cleanSymbol(pool.tokenY.symbol) || tokenSymbols.get(pool.tokenY.id.toLowerCase()) || null;
       const marketData = market.byPool.get(address);
-      const tvl = pool.totalValueLockedUSD === null ? null : Number(pool.totalValueLockedUSD);
+      const subgraphTvl = pool.totalValueLockedUSD === null ? null : Number(pool.totalValueLockedUSD);
+      const reserveTvl = marketData?.reserveUsd ?? null;
+      const tvl = subgraphTvl !== null && Number.isFinite(subgraphTvl) && subgraphTvl > 0
+        ? subgraphTvl
+        : reserveTvl !== null && Number.isFinite(reserveTvl) && reserveTvl > 0 ? reserveTvl : null;
       const volume24h = marketData?.volume24h ?? null;
       const volumeToTVL = tvl !== null && tvl > 0 && volume24h !== null ? volume24h / tvl : null;
 
       return {
         id: pool.id, address,
         pair: `${tokenA || pool.tokenX.id.slice(0, 8)}/${tokenB || pool.tokenY.id.slice(0, 8)}`,
-        tokenA: tokenA || null, tokenB: tokenB || null,
+        tokenA, tokenB,
         tokenAAddress: pool.tokenX.id, tokenBAddress: pool.tokenY.id,
         decimalsA: pool.tokenX.decimals, decimalsB: pool.tokenY.decimals,
         protocol: 'Ramses DLMM',
@@ -128,6 +179,9 @@ export async function GET() {
       };
     });
 
+    const tvlFromSubgraph = pools.filter((pool) => pool.tvl !== null && pool.tvl === Number(pool.totalValueLockedUSD ?? NaN)).length;
+    const tvlFromMarket = pools.filter((pool) => pool.tvl !== null && Number(pool.totalValueLockedUSD ?? 0) <= 0).length;
+
     return NextResponse.json({
       apiVersion: API_VERSION,
       status: 'live',
@@ -136,14 +190,18 @@ export async function GET() {
       pools,
       dataQuality: {
         poolSource: 'Robinhood Chain RPC + Ramses DLMM subgraph',
+        tokenMetadataSource: 'Ramses subgraph + Robinhood Chain ERC-20 symbol()',
         volumeSource: 'GeckoTerminal pool market data',
+        tvlSource: 'Subgraph totalValueLockedUSD with GeckoTerminal reserve_in_usd fallback for zero/missing TVL',
         volumeWindowSeconds: 86_400,
         volumeComplete: market.complete,
         poolsDiscovered: poolRows.length,
         poolsWithMarketData: market.poolsReturned,
-        note: market.complete
-          ? 'Volume and swap-count metrics are read from verified pool market data for every discovered pool.'
-          : 'Some pools have no verified market response yet; missing volume-derived fields remain null rather than estimated.',
+        poolsWithResolvedTokenSymbols: pools.filter((pool) => pool.tokenA !== null && pool.tokenB !== null).length,
+        tvlResolved: pools.filter((pool) => pool.tvl !== null).length,
+        tvlFromSubgraph,
+        tvlFallbackEligible: tvlFromMarket,
+        note: 'Token symbols are resolved from live on-chain ERC-20 metadata when the subgraph symbol is missing. Zero/missing subgraph TVL uses verified market reserve USD when available.',
       },
       indexer: {
         status: 'live', lastIndexedBlock: blockNumber, lastIndexedTimestamp: Date.now(), poolsDiscovered: pools.length,
