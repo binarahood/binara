@@ -8,15 +8,16 @@ const RPC_URL = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robi
 const SUBGRAPH_URL = 'https://gateway.kingdom.dev/robinhood/subgraph/v1/graphql';
 const WETH_ADDRESS = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73';
 const USDG_ADDRESS = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
-const API_VERSION = '1.7-onchain-tvl-token-registry';
+const API_VERSION = '1.8-live-tvl-token-price-fix';
 const ERC20_SYMBOL_SELECTOR = '0x95d89b41';
 const ERC20_NAME_SELECTOR = '0x06fdde03';
 const ERC20_BALANCE_OF_PREFIX = '0x70a08231';
+const DLMM_GET_RESERVES_SELECTOR = '0x0902f1ac';
 const GECKO_BASE_URL = 'https://api.geckoterminal.com/api/v2';
 const GECKO_NETWORK = 'robinhood';
 const TOKEN_PRICE_BATCH_SIZE = 30;
+const REAL_ID_SHIFT = 1 << 23;
 
-// High-confidence metadata from official Robinhood token registry / well-known Robinhood Chain assets.
 const TOKEN_REGISTRY: Record<string, { symbol: string; name?: string }> = {
   [WETH_ADDRESS.toLowerCase()]: { symbol: 'WETH', name: 'Wrapped Ether' },
   [USDG_ADDRESS.toLowerCase()]: { symbol: 'USDG', name: 'Global Dollar' },
@@ -106,12 +107,26 @@ function encodeAddressCall(prefix: string, address: string): string {
   return `${prefix}${address.toLowerCase().replace(/^0x/, '').padStart(64, '0')}`;
 }
 
+function encodeUint24Call(selector: string, value: number): string {
+  return `${selector}${Math.max(0, Math.floor(value)).toString(16).padStart(64, '0')}`;
+}
+
 function decodeUint(hex: string): bigint | null {
   try {
     if (!hex || hex === '0x') return null;
     return BigInt(hex);
   } catch {
     return null;
+  }
+}
+
+function decodeTwoUint128(hex: string): [bigint | null, bigint | null] {
+  try {
+    const body = hex.replace(/^0x/, '');
+    if (body.length < 128) return [null, null];
+    return [BigInt(`0x${body.slice(0, 64)}`), BigInt(`0x${body.slice(64, 128)}`)];
+  } catch {
+    return [null, null];
   }
 }
 
@@ -147,21 +162,24 @@ async function resolveTokenMetadata(addresses: string[]): Promise<Map<string, { 
 async function fetchTokenPrices(addresses: string[]): Promise<Map<string, number>> {
   const unique = Array.from(new Set(addresses.map((address) => address.toLowerCase())));
   const prices = new Map<string, number>();
-  for (const address of unique) {
-    if (address === USDG_ADDRESS.toLowerCase()) prices.set(address, 1);
-  }
+  prices.set(USDG_ADDRESS.toLowerCase(), 1);
 
   const batches: string[][] = [];
   for (let i = 0; i < unique.length; i += TOKEN_PRICE_BATCH_SIZE) batches.push(unique.slice(i, i + TOKEN_PRICE_BATCH_SIZE));
   const results = await Promise.allSettled(batches.map(async (batch) => {
     const encoded = batch.join(',');
     const response = await fetch(`${GECKO_BASE_URL}/simple/networks/${GECKO_NETWORK}/token_price/${encoded}`, {
-      headers: { accept: 'application/json' },
+      headers: { accept: 'application/json;version=20230203' },
       cache: 'no-store',
     });
     if (!response.ok) throw new Error(`GeckoTerminal token price HTTP ${response.status}`);
-    const body = await response.json() as { data?: Record<string, { attributes?: { token_prices?: Record<string, string> } }> };
-    const tokenPrices = body.data?.attributes?.token_prices || {};
+    const body = await response.json() as {
+      data?: {
+        attributes?: { token_prices?: Record<string, string> };
+      } | Array<{ attributes?: { token_prices?: Record<string, string> } }>;
+    };
+    const data = Array.isArray(body.data) ? body.data[0] : body.data;
+    const tokenPrices = data?.attributes?.token_prices || {};
     return Object.entries(tokenPrices).flatMap(([address, price]) => {
       const value = Number(price);
       return Number.isFinite(value) && value > 0 ? [{ address: address.toLowerCase(), value }] : [];
@@ -169,6 +187,15 @@ async function fetchTokenPrices(addresses: string[]): Promise<Map<string, number
   }));
   for (const result of results) if (result.status === 'fulfilled') for (const item of result.value) prices.set(item.address, item.value);
   return prices;
+}
+
+async function fetchExactPoolReserves(poolAddressValue: string): Promise<[bigint | null, bigint | null]> {
+  try {
+    const result = await rpcCall('eth_call', [{ to: poolAddressValue, data: DLMM_GET_RESERVES_SELECTOR }, 'latest']);
+    return decodeTwoUint128(result);
+  } catch {
+    return [null, null];
+  }
 }
 
 async function fetchPoolBalances(poolAddressValue: string, tokenAddresses: string[]): Promise<[bigint | null, bigint | null]> {
@@ -184,12 +211,40 @@ async function fetchPoolBalances(poolAddressValue: string, tokenAddresses: strin
 }
 
 function balanceUsd(balance: bigint | null, decimals: number | null, priceUsd: number | undefined): number | null {
-  if (balance === null || decimals === null || !Number.isFinite(decimals) || !priceUsd || priceUsd <= 0) return null;
+  if (balance === null || decimals === null || !Number.isFinite(decimals) || priceUsd === undefined || !Number.isFinite(priceUsd) || priceUsd <= 0) return null;
   const raw = Number(balance);
   if (!Number.isFinite(raw)) return null;
   const amount = raw / 10 ** decimals;
   const usd = amount * priceUsd;
   return Number.isFinite(usd) ? usd : null;
+}
+
+function derivePoolTokenPrices(
+  pool: PoolRow,
+  tokenPrices: Map<string, number>,
+): Map<string, number> {
+  const derived = new Map<string, number>();
+  const x = pool.tokenX.id.toLowerCase();
+  const y = pool.tokenY.id.toLowerCase();
+  const knownX = tokenPrices.get(x);
+  const knownY = tokenPrices.get(y);
+  if (knownX !== undefined && knownY !== undefined) return derived;
+  if (pool.activeId === null || !Number.isFinite(pool.activeId) || !Number.isFinite(pool.binStep) || pool.binStep <= 0) return derived;
+
+  const exponent = pool.activeId - REAL_ID_SHIFT;
+  const rawPriceYPerX = Math.pow(1 + pool.binStep / 10_000, exponent);
+  if (!Number.isFinite(rawPriceYPerX) || rawPriceYPerX <= 0) return derived;
+  const humanPriceYPerX = rawPriceYPerX * 10 ** ((pool.tokenX.decimals ?? 0) - (pool.tokenY.decimals ?? 0));
+  if (!Number.isFinite(humanPriceYPerX) || humanPriceYPerX <= 0) return derived;
+
+  if (knownY !== undefined && knownX === undefined) {
+    const priceX = knownY / humanPriceYPerX;
+    if (Number.isFinite(priceX) && priceX > 0) derived.set(x, priceX);
+  } else if (knownX !== undefined && knownY === undefined) {
+    const priceY = knownX * humanPriceYPerX;
+    if (Number.isFinite(priceY) && priceY > 0) derived.set(y, priceY);
+  }
+  return derived;
 }
 
 interface PoolRow {
@@ -249,15 +304,19 @@ export async function GET() {
       return !Number.isFinite(tvl) || tvl <= 0;
     });
 
-    const onchainBalances = new Map<string, [bigint | null, bigint | null]>();
-    const balanceConcurrency = 10;
+    const onchainState = new Map<string, { reserves: [bigint | null, bigint | null]; balances: [bigint | null, bigint | null] }>();
+    const balanceConcurrency = 8;
     for (let i = 0; i < zeroOrMissingTvlPools.length; i += balanceConcurrency) {
       const batch = zeroOrMissingTvlPools.slice(i, i + balanceConcurrency);
       const results = await Promise.all(batch.map(async (pool) => {
         const address = poolAddress(pool.id);
-        return [address, await fetchPoolBalances(address, [pool.tokenX.id, pool.tokenY.id])] as const;
+        const [reserves, balances] = await Promise.all([
+          fetchExactPoolReserves(address),
+          fetchPoolBalances(address, [pool.tokenX.id, pool.tokenY.id]),
+        ]);
+        return [address, { reserves, balances }] as const;
       }));
-      for (const [address, balances] of results) onchainBalances.set(address, balances);
+      for (const [address, state] of results) onchainState.set(address, state);
     }
 
     const pools = poolRows.map((pool) => {
@@ -269,9 +328,15 @@ export async function GET() {
       const marketData = market.byPool.get(address);
       const subgraphTvl = pool.totalValueLockedUSD === null ? null : Number(pool.totalValueLockedUSD);
       const reserveTvl = marketData?.reserveUsd ?? null;
-      const onchain = onchainBalances.get(address);
-      const onchainAUsd = onchain ? balanceUsd(onchain[0], pool.tokenX.decimals, tokenPrices.get(pool.tokenX.id.toLowerCase())) : null;
-      const onchainBUsd = onchain ? balanceUsd(onchain[1], pool.tokenY.decimals, tokenPrices.get(pool.tokenY.id.toLowerCase())) : null;
+      const state = onchainState.get(address);
+      const exactReserves = state?.reserves || [null, null];
+      const balances = exactReserves[0] !== null && exactReserves[1] !== null ? exactReserves : state?.balances || [null, null];
+
+      const derivedPrices = derivePoolTokenPrices(pool, tokenPrices);
+      const priceA = tokenPrices.get(pool.tokenX.id.toLowerCase()) ?? derivedPrices.get(pool.tokenX.id.toLowerCase());
+      const priceB = tokenPrices.get(pool.tokenY.id.toLowerCase()) ?? derivedPrices.get(pool.tokenY.id.toLowerCase());
+      const onchainAUsd = balanceUsd(balances[0], pool.tokenX.decimals, priceA);
+      const onchainBUsd = balanceUsd(balances[1], pool.tokenY.decimals, priceB);
       const onchainTvl = onchainAUsd !== null && onchainBUsd !== null ? onchainAUsd + onchainBUsd : null;
       const tvl = subgraphTvl !== null && Number.isFinite(subgraphTvl) && subgraphTvl > 0
         ? subgraphTvl
@@ -307,14 +372,14 @@ export async function GET() {
           : reserveTvl !== null && Number.isFinite(reserveTvl) && reserveTvl > 0
             ? 'geckoterminal'
             : onchainTvl !== null && onchainTvl > 0
-              ? 'onchain-token-balances'
+              ? 'onchain-dlmm-reserves'
               : 'unresolved',
-        reserveX: pool.reserveX,
-        reserveY: pool.reserveY,
-        onchainBalanceX: onchain?.[0]?.toString() ?? null,
-        onchainBalanceY: onchain?.[1]?.toString() ?? null,
-        tokenAPriceUsd: tokenPrices.get(pool.tokenX.id.toLowerCase()) ?? null,
-        tokenBPriceUsd: tokenPrices.get(pool.tokenY.id.toLowerCase()) ?? null,
+        reserveX: exactReserves[0]?.toString() ?? pool.reserveX ?? null,
+        reserveY: exactReserves[1]?.toString() ?? pool.reserveY ?? null,
+        onchainBalanceX: balances[0]?.toString() ?? null,
+        onchainBalanceY: balances[1]?.toString() ?? null,
+        tokenAPriceUsd: priceA ?? null,
+        tokenBPriceUsd: priceB ?? null,
         volume1h: marketData?.volume1h ?? null,
         volume6h: marketData?.volume6h ?? null,
         volume24h,
@@ -344,8 +409,8 @@ export async function GET() {
         poolSource: 'Robinhood Chain RPC + Ramses DLMM subgraph',
         tokenMetadataSource: 'Official registry + Ramses subgraph + Robinhood Chain ERC-20 symbol()/name()',
         volumeSource: 'GeckoTerminal pool market data',
-        tokenPriceSource: 'GeckoTerminal token prices with USDG fixed at $1',
-        tvlSource: 'Subgraph TVL -> GeckoTerminal exact-pool reserve USD -> on-chain ERC-20 balances x token USD prices',
+        tokenPriceSource: 'GeckoTerminal simple token prices with USDG fixed at $1 and DLMM price-derived fallback when one side is known',
+        tvlSource: 'Subgraph TVL -> GeckoTerminal exact-pool reserve USD -> exact DLMM getReserves() x live token USD prices',
         volumeWindowSeconds: 86_400,
         volumeComplete: market.complete,
         poolsDiscovered: poolRows.length,
@@ -354,10 +419,11 @@ export async function GET() {
         tvlResolved: pools.filter((pool) => pool.tvl !== null).length,
         tvlFromSubgraph: pools.filter((pool) => pool.tvlSource === 'subgraph').length,
         tvlFromGeckoTerminal: pools.filter((pool) => pool.tvlSource === 'geckoterminal').length,
-        tvlFromOnchainBalances: pools.filter((pool) => pool.tvlSource === 'onchain-token-balances').length,
+        tvlFromOnchainReserves: pools.filter((pool) => pool.tvlSource === 'onchain-dlmm-reserves').length,
         tvlUnresolved: pools.filter((pool) => pool.tvlSource === 'unresolved').length,
-        onchainBalanceFallbackChecked: zeroOrMissingTvlPools.length,
-        note: 'Binara never substitutes token-wide liquidity for pool TVL. On-chain fallback is calculated only from the exact pool address balances and live token USD prices. If both cannot be verified, TVL remains unresolved rather than fabricated.',
+        onchainFallbackChecked: zeroOrMissingTvlPools.length,
+        tokenPricesResolved: tokenPrices.size,
+        note: 'Binara never substitutes token-wide liquidity for pool TVL. On-chain fallback uses the exact DLMM pool reserves and token prices; when only one side has a verified USD price, the other side may be derived from the pool active-bin price and is labeled by the on-chain TVL source.',
       },
       indexer: {
         status: 'live',
