@@ -3,12 +3,25 @@
 import { NextResponse } from 'next/server';
 import { runIndexer, syncPools } from '@/lib/indexer/dlmmIndexer';
 import { indexerStore, IndexedPool } from '@/lib/indexer/store';
+import { resolveTokenPair } from '@/lib/tokenMetadata';
 
 const CHAIN_ID = 4663;
 const RPC_URL = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
 
-// Track whether a background refresh is already running in this warm process.
 let indexerStarted = false;
+
+async function rpcCall(method: string, params: unknown[] = []): Promise<string> {
+  const res = await fetch(RPC_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    cache: 'no-store',
+  });
+  if (!res.ok) throw new Error(`RPC HTTP ${res.status}`);
+  const data = await res.json() as { result?: string; error?: { message?: string } };
+  if (data.error || !data.result) throw new Error(data.error?.message || 'RPC response missing result');
+  return data.result;
+}
 
 async function ensureIndexerRunning() {
   if (indexerStarted) return;
@@ -22,42 +35,48 @@ async function ensureIndexerRunning() {
 
 /**
  * Converts an IndexedPool to the API response format.
- * Returns N/A strings for unavailable USD values.
+ * Token symbols are resolved from the live token contracts when the indexed
+ * metadata is missing or malformed, so the scanner does not expose raw
+ * addresses as the primary pair label when ERC-20 metadata is available.
  */
-function formatPoolForAPI(pool: IndexedPool) {
+async function formatPoolForAPI(pool: IndexedPool) {
+  const pair = await resolveTokenPair(
+    pool.tokenA,
+    pool.tokenB,
+    pool.symbolA,
+    pool.symbolB,
+    pool.decimalsA,
+    pool.decimalsB,
+  );
+
   return {
     id: pool.address,
     address: pool.address,
-    pair: pool.pair,
-    tokenA: pool.symbolA,
-    tokenB: pool.symbolB,
+    pair: pair.pair,
+    tokenA: pair.tokenA.symbol,
+    tokenB: pair.tokenB.symbol,
     tokenAAddress: pool.tokenA,
     tokenBAddress: pool.tokenB,
-    decimalsA: pool.decimalsA,
-    decimalsB: pool.decimalsB,
+    decimalsA: pair.tokenA.decimals,
+    decimalsB: pair.tokenB.decimals,
     protocol: pool.protocol,
 
-    // Price
     currentPrice: pool.currentPrice,
     priceChange24h: pool.priceChange24h,
 
-    // DLMM specifics
     binStep: pool.binStep,
     activeBin: pool.activeBin,
     fee: pool.fee,
 
-    // Liquidity
     tvl: pool.tvl,
     reserveX: pool.reserveX,
     reserveY: pool.reserveY,
 
-    // Volume — USD if available, null otherwise (UI shows N/A)
     volume1h: pool.volumeUSD1h,
     volume6h: pool.volumeUSD6h,
     volume24h: pool.volumeUSD24h,
     volumeRaw24h: pool.volume24h,
 
-    // Derived
     volumeToTVL: pool.volumeToTVL,
     volatility: pool.volatility,
     analyticsScore: pool.analyticsScore,
@@ -65,12 +84,10 @@ function formatPoolForAPI(pool: IndexedPool) {
     estimatedAPR: pool.estimatedAPR,
     timeInRange: pool.timeInRange,
 
-    // Activity
     swapCount24h: pool.swapCount24h,
     swapCount1h: pool.swapCount1h,
     status: pool.status,
 
-    // Timestamps
     createdBlock: pool.createdBlock,
     createdAt: pool.createdTimestamp
       ? new Date(pool.createdTimestamp * 1000).toISOString()
@@ -81,7 +98,6 @@ function formatPoolForAPI(pool: IndexedPool) {
 
 export async function GET() {
   try {
-    // Verify chain connectivity
     const [blockHex, chainHex] = await Promise.all([
       rpcCall('eth_blockNumber'),
       rpcCall('eth_chainId'),
@@ -92,16 +108,13 @@ export async function GET() {
     if (chainId !== CHAIN_ID) {
       return NextResponse.json(
         { error: `Wrong chain. Expected ${CHAIN_ID}, got ${chainId}` },
-        { status: 502 }
+        { status: 502 },
       );
     }
 
     let indexerState = indexerStore.getState();
     let rawPools = indexerStore.getAllPools();
 
-    // On a fresh Vercel serverless instance the in-memory store is empty.
-    // Do one synchronous discovery pass so the first request can actually
-    // return real pools instead of returning an empty placeholder response.
     if (rawPools.length === 0 && indexerState.status !== 'indexing') {
       try {
         await syncPools();
@@ -112,13 +125,11 @@ export async function GET() {
       indexerState = indexerStore.getState();
       rawPools = indexerStore.getAllPools();
     } else if (rawPools.length > 0) {
-      // Keep live RPC fields fresh on warm instances without blocking the response.
       void ensureIndexerRunning();
     }
 
-    const pools = rawPools.map(formatPoolForAPI);
+    const pools = await Promise.all(rawPools.map(formatPoolForAPI));
 
-    // Determine data status
     let dataStatus: 'live' | 'indexing' | 'error';
     if (indexerState.status === 'error') {
       dataStatus = 'error';
@@ -155,7 +166,7 @@ export async function GET() {
         status: 'error',
         pools: [],
       },
-      { status: 503 }
+      { status: 503 },
     );
   }
 }
