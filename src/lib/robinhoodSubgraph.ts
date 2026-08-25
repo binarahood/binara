@@ -23,30 +23,22 @@ export interface RobinhoodSubgraphPool {
   isAlive?: boolean;
 }
 
-interface GraphQLResponse<T> {
-  data?: T;
-  errors?: Array<{ message?: string }>;
-}
+interface GraphQLResponse<T> { data?: T; errors?: Array<{ message?: string }>; }
 
 async function query<T>(body: string, variables: Record<string, unknown> = {}): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
     const response = await fetch(ROBINHOOD_SUBGRAPH_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ query: body, variables }),
-      cache: 'no-store',
-      signal: controller.signal,
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: body, variables }), cache: 'no-store', signal: controller.signal,
     });
     if (!response.ok) throw new Error(`Subgraph HTTP ${response.status}`);
     const result = (await response.json()) as GraphQLResponse<T>;
     if (result.errors?.length) throw new Error(result.errors[0]?.message || 'Subgraph query failed');
     if (!result.data) throw new Error('Subgraph returned no data');
     return result.data;
-  } finally {
-    clearTimeout(timeout);
-  }
+  } finally { clearTimeout(timeout); }
 }
 
 export async function getPools(limit = 500): Promise<RobinhoodSubgraphPool[]> {
@@ -55,6 +47,8 @@ export async function getPools(limit = 500): Promise<RobinhoodSubgraphPool[]> {
     `query GetPools($chainId: Int!, $limit: Int!) {
       DLMMPool(where: { chainId: { _eq: $chainId } } limit: $limit) {
         id
+        tokenX
+        tokenY
       }
     }`,
     { chainId: ROBINHOOD_CHAIN_ID, limit: safeLimit },
@@ -62,9 +56,7 @@ export async function getPools(limit = 500): Promise<RobinhoodSubgraphPool[]> {
   return data.DLMMPool ?? [];
 }
 
-export async function checkSubgraph(): Promise<{ pools: number }> {
-  return { pools: (await getPools(1)).length };
-}
+export async function checkSubgraph(): Promise<{ pools: number }> { return { pools: (await getPools(1)).length }; }
 
 function shortAddress(address: string): string {
   const value = String(address || '');
@@ -76,42 +68,17 @@ export function toLivePool(pool: RobinhoodSubgraphPool) {
   const tokenY = String(pool.tokenY || '');
   const tvl = pool.totalValueLockedUSD == null ? null : Number(pool.totalValueLockedUSD);
   return {
-    id: pool.id,
-    address: pool.id,
-    pair: `${shortAddress(tokenX)}/${shortAddress(tokenY)}`,
-    tokenA: shortAddress(tokenX),
-    tokenB: shortAddress(tokenY),
-    tokenAAddress: tokenX,
-    tokenBAddress: tokenY,
-    decimalsA: 18,
-    decimalsB: 18,
-    protocol: 'Robinhood DLMM',
-    currentPrice: null,
-    priceChange24h: null,
-    binStep: Number(pool.binStep) || 0,
-    activeBin: pool.activeId ?? null,
-    fee: (Number(pool.binStep) || 0) * 0.01,
-    tvl: Number.isFinite(tvl) && tvl >= 0 ? tvl : null,
-    reserveX: pool.reserveX || '0',
-    reserveY: pool.reserveY || '0',
-    volume1h: null,
-    volume6h: null,
-    volume24h: null,
-    volumeRaw24h: 0,
-    volumeToTVL: 0,
-    volatility: 0,
-    analyticsScore: 35,
-    riskLevel: 'MEDIUM' as const,
-    estimatedAPR: null,
-    timeInRange: null,
-    swapCount24h: 0,
-    swapCount1h: 0,
-    status: pool.isAlive === false ? 'inactive' as const : 'active' as const,
+    id: pool.id, address: pool.id, pair: `${shortAddress(tokenX)}/${shortAddress(tokenY)}`,
+    tokenA: shortAddress(tokenX), tokenB: shortAddress(tokenY), tokenAAddress: tokenX, tokenBAddress: tokenY,
+    decimalsA: 18, decimalsB: 18, protocol: 'Robinhood DLMM', currentPrice: null, priceChange24h: null,
+    binStep: Number(pool.binStep) || 0, activeBin: pool.activeId ?? null, fee: (Number(pool.binStep) || 0) * 0.01,
+    tvl: Number.isFinite(tvl) && tvl >= 0 ? tvl : null, reserveX: pool.reserveX || '0', reserveY: pool.reserveY || '0',
+    volume1h: null, volume6h: null, volume24h: null, volumeRaw24h: 0, volumeToTVL: 0, volatility: 0,
+    analyticsScore: 35, riskLevel: 'MEDIUM' as const, estimatedAPR: null, timeInRange: null,
+    swapCount24h: 0, swapCount1h: 0, status: pool.isAlive === false ? 'inactive' as const : 'active' as const,
     createdBlock: Number(pool.createdAtBlockNumber) || 0,
     createdAt: pool.createdAtTimestamp ? new Date(Number(pool.createdAtTimestamp) * 1000).toISOString() : null,
-    updatedAt: new Date().toISOString(),
-    stablePair: tokenX.toLowerCase() === USDG || tokenY.toLowerCase() === USDG,
-    reserveXHuman: 0,
-    reserveYHuman: 0,
+    updatedAt: new Date().toISOString(), stablePair: tokenX.toLowerCase() === USDG || tokenY.toLowerCase() === USDG,
+    reserveXHuman: 0, reserveYHuman: 0,
   };
 }
