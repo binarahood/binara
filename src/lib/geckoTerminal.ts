@@ -19,16 +19,18 @@ export interface GeckoPoolMarketData {
 }
 
 interface GeckoPoolResponse {
-  data?: Array<{ attributes?: {
-    address?: string;
-    base_token_price_usd?: string | number | null;
-    quote_token_price_usd?: string | number | null;
-    base_token_price_quote_token?: string | number | null;
-    reserve_in_usd?: string | number | null;
-    volume_usd?: { h1?: string | number | null; h6?: string | number | null; h24?: string | number | null };
-    price_change_percentage?: { h24?: string | number | null };
-    transactions?: { h1?: { buys?: number | null; sells?: number | null }; h24?: { buys?: number | null; sells?: number | null } };
-  }> }>;
+  data?: Array<{
+    attributes?: {
+      address?: string;
+      base_token_price_usd?: string | number | null;
+      quote_token_price_usd?: string | number | null;
+      base_token_price_quote_token?: string | number | null;
+      reserve_in_usd?: string | number | null;
+      volume_usd?: { h1?: string | number | null; h6?: string | number | null; h24?: string | number | null };
+      price_change_percentage?: { h24?: string | number | null };
+      transactions?: { h1?: { buys?: number | null; sells?: number | null }; h24?: { buys?: number | null; sells?: number | null } };
+    };
+  }>;
 }
 
 function toFiniteNumber(value: unknown): number | null {
