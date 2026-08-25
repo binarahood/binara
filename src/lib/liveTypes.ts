@@ -1,13 +1,13 @@
 /**
  * Shared Pool type for the live API response.
- * This replaces the Pool type from mockData.ts for all live-data components.
+ * Live/derived metrics are nullable when the verified source does not provide them.
  */
 export interface LivePool {
   id: string;
   address: string;
   pair: string;
-  tokenA: string;       // symbol
-  tokenB: string;       // symbol
+  tokenA: string;
+  tokenB: string;
   tokenAAddress: string;
   tokenBAddress: string;
   decimalsA: number;
@@ -21,30 +21,30 @@ export interface LivePool {
   // DLMM specifics
   binStep: number;
   activeBin: number | null;
-  fee: number;          // % e.g. 0.05
+  fee: number;
 
   // Liquidity
   tvl: number | null;
   reserveX: string;
   reserveY: string;
 
-  // Volume (USD when available, null otherwise)
+  // Volume (USD when available)
   volume1h: number | null;
   volume6h: number | null;
   volume24h: number | null;
   volumeRaw24h: number;
 
-  // Derived
-  volumeToTVL: number;
-  volatility: number;
-  analyticsScore: number;
-  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME';
+  // Derived metrics — null means the verified inputs are unavailable.
+  volumeToTVL: number | null;
+  volatility: number | null;
+  analyticsScore: number | null;
+  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME' | null;
   estimatedAPR: number | null;
   timeInRange: number | null;
 
   // Activity
-  swapCount24h: number;
-  swapCount1h: number;
+  swapCount24h: number | null;
+  swapCount1h: number | null;
   status: 'active' | 'inactive';
 
   // Timestamps
