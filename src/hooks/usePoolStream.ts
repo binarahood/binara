@@ -84,6 +84,15 @@ export function usePoolStream() {
   };
 }
 
+/**
+ * Pool-detail currently references this legacy helper directly. Keep the
+ * runtime contract explicit so the detail page cannot crash after hydration.
+ */
+if (typeof globalThis !== 'undefined') {
+  (globalThis as typeof globalThis & { pools_length_check?: (count: number) => boolean }).pools_length_check =
+    (count: number) => count > 0;
+}
+
 export function useSinglePoolStream(poolAddress?: string) {
   const { pools, streamStatus, isLoading, error, secondsAgo, refetch } = usePoolStream();
   const [routeAddress, setRouteAddress] = useState<string | undefined>(poolAddress);
