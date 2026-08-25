@@ -1,6 +1,7 @@
 const BASE_URL = 'https://api.geckoterminal.com/api/v2';
 const NETWORK = 'robinhood';
 const BATCH_SIZE = 20;
+const TOKEN_PRICE_BATCH_SIZE = 30;
 const REQUEST_TIMEOUT_MS = 8_000;
 const MAX_RETRIES = 1;
 const RETRY_DELAY_MS = 800;
@@ -33,6 +34,10 @@ interface GeckoPoolResponse {
       transactions?: { h1?: { buys?: number | null; sells?: number | null }; h24?: { buys?: number | null; sells?: number | null } };
     };
   }>;
+}
+
+interface GeckoTokenPriceResponse {
+  data?: Record<string, string | number | null>;
 }
 
 function toFiniteNumber(value: unknown): number | null {
@@ -92,6 +97,53 @@ async function fetchBatch(addresses: string[], retry = 0): Promise<GeckoPoolMark
   }
 }
 
+async function fetchTokenPriceBatch(addresses: string[], retry = 0): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  if (!addresses.length) return result;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const encoded = addresses.map((address) => encodeURIComponent(address)).join(',');
+    const response = await fetch(`${BASE_URL}/simple/networks/${NETWORK}/token_price/${encoded}`, {
+      headers: { accept: 'application/json;version=20230203' },
+      next: { revalidate: 30 },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      if ((response.status === 429 || response.status >= 500) && retry < MAX_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        return fetchTokenPriceBatch(addresses, retry + 1);
+      }
+      return result;
+    }
+    const body = await response.json() as GeckoTokenPriceResponse;
+    for (const [address, value] of Object.entries(body.data || {})) {
+      const price = toFiniteNumber(value);
+      if (price !== null && price > 0) result.set(address.toLowerCase(), price);
+    }
+    return result;
+  } catch {
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function fetchGeckoTokenPrices(addresses: string[]): Promise<{ byToken: Map<string, number>; batchesSucceeded: number; batchesAttempted: number }> {
+  const unique = Array.from(new Set(addresses.map((address) => address.toLowerCase()).filter(Boolean)));
+  if (!unique.length) return { byToken: new Map(), batchesSucceeded: 0, batchesAttempted: 0 };
+  const batches: string[][] = [];
+  for (let i = 0; i < unique.length; i += TOKEN_PRICE_BATCH_SIZE) batches.push(unique.slice(i, i + TOKEN_PRICE_BATCH_SIZE));
+  const results = await Promise.all(batches.map(fetchTokenPriceBatch));
+  const byToken = new Map<string, number>();
+  let batchesSucceeded = 0;
+  for (const result of results) {
+    if (result.size > 0) batchesSucceeded += 1;
+    for (const [address, price] of result) byToken.set(address, price);
+  }
+  return { byToken, batchesSucceeded, batchesAttempted: batches.length };
+}
+
 export async function fetchGeckoPoolMarketData(addresses: string[]): Promise<{ byPool: Map<string, GeckoPoolMarketData>; complete: boolean; poolsReturned: number; batchesSucceeded: number; batchesAttempted: number }> {
   const unique = Array.from(new Set(addresses.map((address) => address.toLowerCase()).filter(Boolean)));
   if (!unique.length) return { byPool: new Map(), complete: true, poolsReturned: 0, batchesSucceeded: 0, batchesAttempted: 0 };
@@ -105,11 +157,5 @@ export async function fetchGeckoPoolMarketData(addresses: string[]): Promise<{ b
     batchesSucceeded += 1;
     for (const item of result.value) byPool.set(item.address, item);
   }
-  return {
-    byPool,
-    complete: unique.every((address) => isComplete(byPool.get(address))),
-    poolsReturned: byPool.size,
-    batchesSucceeded,
-    batchesAttempted: batches.length,
-  };
+  return { byPool, complete: unique.every((address) => isComplete(byPool.get(address))), poolsReturned: byPool.size, batchesSucceeded, batchesAttempted: batches.length };
 }
