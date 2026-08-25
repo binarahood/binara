@@ -47,6 +47,8 @@ export default function ScannerPage() {
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
     return pools
+      // Only live/active pools are eligible for the opportunity ranking.
+      .filter((p) => p.status === 'active')
       .filter((p) => (p.tvl ?? -1) >= minTVL && (p.volume24h ?? -1) >= minVolume)
       .filter((p) => !q || p.pair.toLowerCase().includes(q) || p.address.toLowerCase().includes(q))
       .map((pool) => ({ pool, score: opportunityScore(pool) }))
@@ -56,6 +58,7 @@ export default function ScannerPage() {
   const scored = rows.filter((r) => r.score !== null);
   const top = scored[0] ?? null;
   const complete = rows.filter((r) => r.score !== null).length;
+  const activePools = pools.filter((p) => p.status === 'active').length;
 
   return (
     <AppLayout>
@@ -77,7 +80,7 @@ export default function ScannerPage() {
         {error && <div className="rounded-xl border border-destructive/40 bg-destructive/10 p-4"><p className="text-sm font-semibold text-destructive">Live data unavailable</p><p className="text-xs text-destructive/80 mt-1">{error}</p></div>}
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <div className="rounded-xl border border-border bg-card p-3"><p className="data-label">Pools</p><p className="text-xl font-bold font-mono-nums mt-1">{isLoading ? '…' : pools.length}</p></div>
+          <div className="rounded-xl border border-border bg-card p-3"><p className="data-label">Active Pools</p><p className="text-xl font-bold font-mono-nums mt-1">{isLoading ? '…' : activePools}</p></div>
           <div className="rounded-xl border border-border bg-card p-3"><p className="data-label">Complete Inputs</p><p className="text-xl font-bold font-mono-nums mt-1">{isLoading ? '…' : complete}</p></div>
           <div className="rounded-xl border border-border bg-card p-3"><p className="data-label">Top Opportunity</p><p className="text-xl font-bold font-mono-nums mt-1">{top?.score ?? 'N/A'}</p></div>
           <div className="rounded-xl border border-border bg-card p-3"><p className="data-label">Top Pair</p><p className="text-xl font-bold truncate mt-1">{top?.pool.pair ?? 'N/A'}</p></div>
