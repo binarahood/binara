@@ -4,6 +4,7 @@ import { GeistSans } from 'geist/font/sans';
 import { GeistMono } from 'geist/font/mono';
 import '../styles/tailwind.css';
 import { Toaster } from 'sonner';
+import { WalletProvider } from '@/hooks/useWallet';
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -31,7 +32,9 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable} dark`}>
       <body className={GeistSans.className}>
-        {children}
+        <WalletProvider>
+          {children}
+        </WalletProvider>
         <Toaster
           position="bottom-right"
           theme="dark"
@@ -43,7 +46,7 @@ export default function RootLayout({
             },
           }}
         />
-</body>
+      </body>
     </html>
   );
 }
