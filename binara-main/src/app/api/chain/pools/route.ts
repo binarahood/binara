@@ -9,6 +9,7 @@ const CHAIN_ID = 4663;
 const RPC_URL = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
 const WETH_ADDRESS = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73';
 const USDG_ADDRESS = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
+const API_VERSION = '1.1-volume-swap';
 
 let indexerStarted = false;
 
@@ -137,6 +138,7 @@ export async function GET() {
         : 'live';
 
     return NextResponse.json({
+      apiVersion: API_VERSION,
       status: dataStatus,
       chainId,
       blockNumber,
@@ -157,7 +159,7 @@ export async function GET() {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown RPC error';
     return NextResponse.json(
-      { error: 'Unable to retrieve live Robinhood Chain data.', detail: message, status: 'error', pools: [] },
+      { apiVersion: API_VERSION, error: 'Unable to retrieve live Robinhood Chain data.', detail: message, status: 'error', pools: [] },
       { status: 503 },
     );
   }
