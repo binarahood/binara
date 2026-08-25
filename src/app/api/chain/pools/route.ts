@@ -12,6 +12,10 @@ function poolAddress(id: string): string {
   return (separator >= 0 ? id.slice(separator + 1) : id).toLowerCase();
 }
 
+function tokenAddress(value: string | null | undefined): string {
+  return String(value || '').trim().toLowerCase();
+}
+
 function tokenSymbol(value: string | null | undefined, fallback: string): string {
   return value?.trim() || fallback;
 }
@@ -20,7 +24,9 @@ export async function GET() {
   try {
     const sourcePools = await getPools(500);
     const poolAddresses = sourcePools.map((pool) => poolAddress(pool.id));
-    const tokenAddresses = sourcePools.flatMap((pool) => [pool.tokenX.id, pool.tokenY.id]);
+    const tokenAddresses = Array.from(new Set(
+      sourcePools.flatMap((pool) => [tokenAddress(pool.tokenX), tokenAddress(pool.tokenY)]).filter(Boolean),
+    ));
 
     const [market, gmgn] = await Promise.all([
       fetchGeckoPoolMarketData(poolAddresses),
@@ -31,8 +37,10 @@ export async function GET() {
       const base = toLivePool(sourcePool);
       const address = poolAddress(sourcePool.id);
       const marketData = market.byPool.get(address);
-      const gmgnA = gmgn.byToken.get(sourcePool.tokenX.id.toLowerCase()) ?? null;
-      const gmgnB = gmgn.byToken.get(sourcePool.tokenY.id.toLowerCase()) ?? null;
+      const tokenX = tokenAddress(sourcePool.tokenX);
+      const tokenY = tokenAddress(sourcePool.tokenY);
+      const gmgnA = tokenX ? gmgn.byToken.get(tokenX) ?? null : null;
+      const gmgnB = tokenY ? gmgn.byToken.get(tokenY) ?? null : null;
 
       const tokenA = tokenSymbol(gmgnA?.symbol, base.tokenA);
       const tokenB = tokenSymbol(gmgnB?.symbol, base.tokenB);
