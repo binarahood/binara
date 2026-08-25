@@ -15,8 +15,6 @@ export interface GeckoPoolMarketData {
   swapCount1h: number | null;
   swapCount24h: number | null;
   reserveUsd: number | null;
-  volatility24h: number | null;
-  priceBand5Pct24h: number | null;
   source: 'geckoterminal';
 }
 
@@ -33,13 +31,10 @@ interface GeckoPoolResponse {
   }> }>;
 }
 
-interface GeckoOhlcvResponse { data?: { attributes?: { ohlcv_list?: Array<Array<number | string>> } } }
-
 function toFiniteNumber(value: unknown): number | null {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
-
 function sumTx(value: { buys?: number | null; sells?: number | null } | undefined): number | null {
   if (!value) return null;
   const buys = toFiniteNumber(value.buys);
@@ -47,67 +42,35 @@ function sumTx(value: { buys?: number | null; sells?: number | null } | undefine
   return buys === null || sells === null ? null : buys + sells;
 }
 
-async function fetchJson(url: string): Promise<unknown> {
+async function fetchBatch(addresses: string[]): Promise<GeckoPoolMarketData[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(url, { headers: { accept: 'application/json;version=20230203' }, cache: 'no-store', signal: controller.signal });
+    const encoded = addresses.map((address) => encodeURIComponent(address)).join(',');
+    const response = await fetch(`${BASE_URL}/networks/${NETWORK}/pools/multi/${encoded}`, {
+      headers: { accept: 'application/json;version=20230203' }, cache: 'no-store', signal: controller.signal,
+    });
     if (!response.ok) throw new Error(`GeckoTerminal HTTP ${response.status}`);
-    return response.json();
+    const body = await response.json() as GeckoPoolResponse;
+    return (body.data || []).flatMap((item) => {
+      const a = item.attributes;
+      if (!a?.address) return [];
+      return [{
+        address: a.address.toLowerCase(),
+        baseTokenPriceUsd: toFiniteNumber(a.base_token_price_usd),
+        quoteTokenPriceUsd: toFiniteNumber(a.quote_token_price_usd),
+        baseTokenPriceQuoteToken: toFiniteNumber(a.base_token_price_quote_token),
+        priceChange24h: toFiniteNumber(a.price_change_percentage?.h24),
+        volume1h: toFiniteNumber(a.volume_usd?.h1),
+        volume6h: toFiniteNumber(a.volume_usd?.h6),
+        volume24h: toFiniteNumber(a.volume_usd?.h24),
+        swapCount1h: sumTx(a.transactions?.h1),
+        swapCount24h: sumTx(a.transactions?.h24),
+        reserveUsd: toFiniteNumber(a.reserve_in_usd),
+        source: 'geckoterminal' as const,
+      }];
+    });
   } finally { clearTimeout(timer); }
-}
-
-function realizedVolatility(closes: number[]): number | null {
-  if (closes.length < 3) return null;
-  const returns: number[] = [];
-  for (let i = 1; i < closes.length; i += 1) {
-    const r = Math.log(closes[i] / closes[i - 1]);
-    if (Number.isFinite(r)) returns.push(r);
-  }
-  if (returns.length < 2) return null;
-  const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length;
-  const variance = returns.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (returns.length - 1);
-  return Number.isFinite(variance) ? Math.sqrt(variance) * Math.sqrt(24) * 100 : null;
-}
-
-async function fetch24hAnalytics(address: string, currentPrice: number | null) {
-  try {
-    const body = await fetchJson(`${BASE_URL}/networks/${NETWORK}/pools/${encodeURIComponent(address)}/ohlcv/hour?limit=25`) as GeckoOhlcvResponse;
-    const rows = body.data?.attributes?.ohlcv_list ?? [];
-    const closes = rows.map((row) => toFiniteNumber(row[4])).filter((value): value is number => value !== null && value > 0).reverse();
-    const volatility24h = realizedVolatility(closes);
-    if (currentPrice === null || closes.length === 0) return { volatility24h, priceBand5Pct24h: null as number | null };
-    const lower = currentPrice * 0.95;
-    const upper = currentPrice * 1.05;
-    const inBand = closes.filter((price) => price >= lower && price <= upper).length;
-    return { volatility24h, priceBand5Pct24h: Number(((inBand / closes.length) * 100).toFixed(1)) };
-  } catch {
-    return { volatility24h: null, priceBand5Pct24h: null };
-  }
-}
-
-async function fetchBatch(addresses: string[]): Promise<GeckoPoolMarketData[]> {
-  const encoded = addresses.map((address) => encodeURIComponent(address)).join(',');
-  const body = await fetchJson(`${BASE_URL}/networks/${NETWORK}/pools/multi/${encoded}`) as GeckoPoolResponse;
-  const basic = (body.data || []).flatMap((item) => {
-    const a = item.attributes;
-    if (!a?.address) return [];
-    return [{
-      address: a.address.toLowerCase(),
-      baseTokenPriceUsd: toFiniteNumber(a.base_token_price_usd),
-      quoteTokenPriceUsd: toFiniteNumber(a.quote_token_price_usd),
-      baseTokenPriceQuoteToken: toFiniteNumber(a.base_token_price_quote_token),
-      priceChange24h: toFiniteNumber(a.price_change_percentage?.h24),
-      volume1h: toFiniteNumber(a.volume_usd?.h1),
-      volume6h: toFiniteNumber(a.volume_usd?.h6),
-      volume24h: toFiniteNumber(a.volume_usd?.h24),
-      swapCount1h: sumTx(a.transactions?.h1),
-      swapCount24h: sumTx(a.transactions?.h24),
-      reserveUsd: toFiniteNumber(a.reserve_in_usd),
-      source: 'geckoterminal' as const,
-    }];
-  });
-  return Promise.all(basic.map(async (item) => ({ ...item, ...(await fetch24hAnalytics(item.address, item.baseTokenPriceUsd)) })));
 }
 
 export async function fetchGeckoPoolMarketData(addresses: string[]): Promise<{ byPool: Map<string, GeckoPoolMarketData>; complete: boolean; poolsReturned: number }> {
