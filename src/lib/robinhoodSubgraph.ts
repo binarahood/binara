@@ -65,7 +65,6 @@ export async function getPools(limit = 500): Promise<RobinhoodSubgraphPool[]> {
       DLMMPool(
         where: { chainId: { _eq: $chainId } }
         limit: $limit
-        order_by: { createdAtTimestamp: desc }
       ) {
         id
         tokenX { id symbol decimals }
