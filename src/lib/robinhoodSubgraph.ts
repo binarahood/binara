@@ -15,8 +15,6 @@ export interface RobinhoodSubgraphPool {
   totalValueLockedUSD?: string | null;
   volumeUSD?: string | null;
   feesUSD?: string | null;
-  createdAtBlockNumber?: number;
-  createdAtTimestamp?: number;
   isAlive?: boolean;
 }
 
@@ -61,8 +59,6 @@ export async function getPools(limit = 500): Promise<RobinhoodSubgraphPool[]> {
         totalValueLockedUSD
         volumeUSD
         feesUSD
-        createdAtBlockNumber
-        createdAtTimestamp
         isAlive
       }
     }`,
@@ -126,8 +122,8 @@ export function toLivePool(pool: RobinhoodSubgraphPool) {
     swapCount24h: 0,
     swapCount1h: 0,
     status: pool.isAlive === false ? 'inactive' as const : 'active' as const,
-    createdBlock: Number(pool.createdAtBlockNumber) || 0,
-    createdAt: pool.createdAtTimestamp ? new Date(Number(pool.createdAtTimestamp) * 1000).toISOString() : null,
+    createdBlock: 0,
+    createdAt: null,
     updatedAt: new Date().toISOString(),
     stablePair: tokenX.toLowerCase() === USDG || tokenY.toLowerCase() === USDG,
     reserveXHuman: rawAmount(pool.reserveX),
