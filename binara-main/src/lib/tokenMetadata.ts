@@ -47,7 +47,6 @@ function decodeSymbol(hex: string): string | null {
     const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
     if (!clean) return null;
 
-    // Standard ABI dynamic string: offset + length + bytes.
     if (clean.length >= 128) {
       const length = Number(BigInt(`0x${clean.slice(64, 128)}`));
       if (length > 0 && length <= 64 && 128 + length * 2 <= clean.length) {
@@ -57,7 +56,6 @@ function decodeSymbol(hex: string): string | null {
       }
     }
 
-    // bytes32 symbol fallback.
     const value = Buffer.from(clean.slice(0, 64), 'hex')
       .toString('utf8').replace(/\0/g, '').trim();
     return value || null;
@@ -138,9 +136,11 @@ export async function resolveTokenPair(
 ): Promise<{ tokenA: TokenMetadata; tokenB: TokenMetadata; pair: string }> {
   const validSymbol = (value?: string | null) => {
     const symbol = String(value || '').trim();
-    if (!symbol) return false;
-    if (symbol === '???' || symbol === 'UNKNOWN') return false;
-    return !/^0x[a-fA-F0-9]{8,}$/.test(symbol);
+    if (!symbol || symbol === '???' || symbol === 'UNKNOWN') return false;
+    // Never preserve shortened/full addresses as if they were token symbols.
+    if (symbol.includes('…') || symbol.includes('...')) return false;
+    if (/^0x/i.test(symbol)) return false;
+    return true;
   };
 
   const [resolvedA, resolvedB] = await Promise.all([
