@@ -4,7 +4,6 @@ import React from 'react';
 import Icon from '@/components/ui/AppIcon';
 
 export interface FilterState {
-  minScore?: number;
   minTVL: number;
   minVolume: number;
   minVolToTVL: number;
@@ -18,11 +17,8 @@ function RangeInput({ label, value, min, max, step, format, onChange }: { label:
 }
 
 export default function FilterSidebar({ filters, onChange, onReset }: FilterSidebarProps) {
-  const minScore = filters.minScore ?? 0;
   return <div className="w-64 flex-shrink-0 rounded-xl border border-border bg-card p-4 space-y-5 self-start sticky top-24">
     <div className="flex items-center justify-between"><h3 className="text-sm font-semibold text-foreground">Live Filters</h3><button onClick={onReset} className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"><Icon name="ArrowPathIcon" size={12} />Reset</button></div>
-
-    <div className="space-y-3"><p className="data-label">Opportunity</p><RangeInput label="Min Score" value={minScore} min={0} max={100} step={5} format={(v) => `${v}`} onChange={(v) => onChange({ ...filters, minScore: v })} /><p className="text-[11px] text-muted-foreground/70">Same verified-data score shown in the scanner table. N/A pools are excluded when this is above 0.</p></div>
 
     <div className="space-y-3"><p className="data-label">Liquidity</p><RangeInput label="Min TVL" value={filters.minTVL} min={0} max={10_000_000} step={100_000} format={(v) => v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(1)}M` : `$${(v / 1_000).toFixed(0)}K`} onChange={(v) => onChange({ ...filters, minTVL: v })} /></div>
 
@@ -30,8 +26,8 @@ export default function FilterSidebar({ filters, onChange, onReset }: FilterSide
 
     <div className="space-y-3"><p className="data-label">Activity</p><RangeInput label="Min Swaps 24h" value={filters.minSwaps} min={0} max={10_000} step={100} format={(v) => v.toLocaleString()} onChange={(v) => onChange({ ...filters, minSwaps: v })} /></div>
 
-    <div className="rounded-lg bg-muted/40 border border-border p-3"><p className="text-xs font-semibold text-foreground mb-1.5">Data policy</p><p className="text-xs text-muted-foreground leading-relaxed">Score is N/A when required verified inputs are missing. The score filter is available without changing the underlying live-data policy.</p></div>
+    <div className="rounded-lg bg-primary/5 border border-primary/20 p-3"><p className="text-xs font-semibold text-foreground mb-1.5">Opportunity Score</p><p className="text-xs text-muted-foreground leading-relaxed">The scanner score is calculated from verified TVL, 24h volume, Vol/TVL and swap activity. Sort the table by <span className="font-semibold text-foreground">Score</span> to rank pools.</p><div className="space-y-1 mt-2"><div className="flex justify-between text-xs"><span className="text-muted-foreground">Efficiency</span><span className="font-mono-nums font-semibold">35%</span></div><div className="flex justify-between text-xs"><span className="text-muted-foreground">24h Volume</span><span className="font-mono-nums font-semibold">25%</span></div><div className="flex justify-between text-xs"><span className="text-muted-foreground">Liquidity</span><span className="font-mono-nums font-semibold">25%</span></div><div className="flex justify-between text-xs"><span className="text-muted-foreground">Activity</span><span className="font-mono-nums font-semibold">15%</span></div></div></div>
 
-    <div className="rounded-lg bg-primary/5 border border-primary/20 p-3"><p className="text-xs font-semibold text-foreground mb-1.5">Score weights</p><div className="space-y-1"><div className="flex justify-between text-xs"><span className="text-muted-foreground">Efficiency</span><span className="font-mono-nums font-semibold">35%</span></div><div className="flex justify-between text-xs"><span className="text-muted-foreground">24h Volume</span><span className="font-mono-nums font-semibold">25%</span></div><div className="flex justify-between text-xs"><span className="text-muted-foreground">Liquidity</span><span className="font-mono-nums font-semibold">25%</span></div><div className="flex justify-between text-xs"><span className="text-muted-foreground">Activity</span><span className="font-mono-nums font-semibold">15%</span></div></div></div>
+    <div className="rounded-lg bg-muted/40 border border-border p-3"><p className="text-xs font-semibold text-foreground mb-1.5">Data policy</p><p className="text-xs text-muted-foreground leading-relaxed">Unavailable verified metrics remain N/A. No placeholder score, risk or APR values are substituted.</p></div>
   </div>;
 }
