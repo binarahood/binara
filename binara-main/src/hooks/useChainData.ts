@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { LivePool } from '@/lib/liveTypes';
+import { getOpportunityScore } from '@/lib/opportunityScore';
 
 export type DataStatus = 'connecting' | 'live' | 'stale' | 'error';
 export interface ChainStatus { status: DataStatus; blockNumber: number | null; chainId: number | null; lastUpdated: number | null; error: string | null; }
@@ -47,6 +48,10 @@ export function useChainStatus() {
   return { chainStatus, refetch: fetchStatus };
 }
 
+function enrichOpportunityScore(pool: LivePool): LivePool {
+  return { ...pool, analyticsScore: getOpportunityScore(pool) };
+}
+
 export function usePoolsData(intervalMs = POOL_INTERVAL_MS) {
   const [pools, setPools] = useState<LivePool[]>([]);
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics>(() => computeDashboardMetrics([]));
@@ -60,7 +65,7 @@ export function usePoolsData(intervalMs = POOL_INTERVAL_MS) {
       const res = await fetch('/api/chain/pools', { cache: 'no-store' });
       const data = await res.json();
       if (!res.ok || data.error) { setError(data.error || 'Unable to retrieve live Robinhood Chain data.'); setIsLoading(false); return; }
-      const livePools: LivePool[] = data.pools || [];
+      const livePools: LivePool[] = (data.pools || []).map(enrichOpportunityScore);
       setPools(livePools); setDashboardMetrics(computeDashboardMetrics(livePools)); setLastUpdated(Date.now()); setIndexerStatus(data.indexer?.status ?? null); setError(null);
     } catch { setError('Unable to retrieve live Robinhood Chain data.'); } finally { setIsLoading(false); }
   }, []);
