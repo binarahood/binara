@@ -35,9 +35,6 @@ const navGroups: NavGroup[] = [
   {
     title: 'Analysis',
     items: [
-      // Pool Detail requires a specific ?address=... and must only be opened
-      // from a selected pool. Keep the navigation entry on the scanner so the
-      // user cannot land on an address-less detail page.
       { label: 'Pools', href: '/pool-scanner', icon: 'CircleStackIcon' },
       { label: 'Positions', href: '/positions', icon: 'ChartBarIcon' },
     ],
@@ -87,8 +84,8 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
       : chainStatus.status === 'stale' ? 'Stale Data' : 'Connecting…';
 
   return (
-    <aside className={`fixed left-0 top-0 h-full z-40 flex flex-col bg-card border-r border-border transition-all duration-300 ease-in-out ${collapsed ? 'w-16' : 'w-60'}`}>
-      <div className={`flex items-center h-20 border-b border-border px-3 ${collapsed ? 'justify-center' : 'justify-center'}`}>
+    <aside className={`hidden md:flex fixed left-0 top-0 h-full z-40 flex-col bg-card border-r border-border transition-all duration-300 ease-in-out ${collapsed ? 'w-16' : 'w-60'}`}>
+      <div className="flex items-center h-20 border-b border-border px-3 justify-center">
         <AppLogo width={collapsed ? 40 : 150} height={collapsed ? 40 : 40} src="/assets/binara-wordmark.svg" className="flex-shrink-0" />
       </div>
 
