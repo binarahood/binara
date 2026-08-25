@@ -1,7 +1,9 @@
 const BASE_URL = 'https://api.geckoterminal.com/api/v2';
 const NETWORK = 'robinhood';
-const BATCH_SIZE = 30;
+const BATCH_SIZE = 20;
 const REQUEST_TIMEOUT_MS = 8_000;
+const MAX_RETRIES = 1;
+const RETRY_DELAY_MS = 800;
 
 export interface GeckoPoolMarketData {
   address: string;
@@ -37,6 +39,7 @@ function toFiniteNumber(value: unknown): number | null {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
+
 function sumTx(value: { buys?: number | null; sells?: number | null } | undefined): number | null {
   if (!value) return null;
   const buys = toFiniteNumber(value.buys);
@@ -44,15 +47,27 @@ function sumTx(value: { buys?: number | null; sells?: number | null } | undefine
   return buys === null || sells === null ? null : buys + sells;
 }
 
-async function fetchBatch(addresses: string[]): Promise<GeckoPoolMarketData[]> {
+function isComplete(item: GeckoPoolMarketData | undefined): boolean {
+  return Boolean(item && item.baseTokenPriceUsd !== null && item.reserveUsd !== null && item.volume24h !== null);
+}
+
+async function fetchBatch(addresses: string[], retry = 0): Promise<GeckoPoolMarketData[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const encoded = addresses.map((address) => encodeURIComponent(address)).join(',');
     const response = await fetch(`${BASE_URL}/networks/${NETWORK}/pools/multi/${encoded}`, {
-      headers: { accept: 'application/json;version=20230203' }, cache: 'no-store', signal: controller.signal,
+      headers: { accept: 'application/json;version=20230203' },
+      next: { revalidate: 60 },
+      signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`GeckoTerminal HTTP ${response.status}`);
+    if (!response.ok) {
+      if ((response.status === 429 || response.status >= 500) && retry < MAX_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        return fetchBatch(addresses, retry + 1);
+      }
+      throw new Error(`GeckoTerminal HTTP ${response.status}`);
+    }
     const body = await response.json() as GeckoPoolResponse;
     return (body.data || []).flatMap((item) => {
       const a = item.attributes;
@@ -72,20 +87,29 @@ async function fetchBatch(addresses: string[]): Promise<GeckoPoolMarketData[]> {
         source: 'geckoterminal' as const,
       }];
     });
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-export async function fetchGeckoPoolMarketData(addresses: string[]): Promise<{ byPool: Map<string, GeckoPoolMarketData>; complete: boolean; poolsReturned: number }> {
+export async function fetchGeckoPoolMarketData(addresses: string[]): Promise<{ byPool: Map<string, GeckoPoolMarketData>; complete: boolean; poolsReturned: number; batchesSucceeded: number; batchesAttempted: number }> {
   const unique = Array.from(new Set(addresses.map((address) => address.toLowerCase()).filter(Boolean)));
-  if (!unique.length) return { byPool: new Map(), complete: true, poolsReturned: 0 };
+  if (!unique.length) return { byPool: new Map(), complete: true, poolsReturned: 0, batchesSucceeded: 0, batchesAttempted: 0 };
   const batches: string[][] = [];
   for (let i = 0; i < unique.length; i += BATCH_SIZE) batches.push(unique.slice(i, i + BATCH_SIZE));
   const results = await Promise.allSettled(batches.map(fetchBatch));
   const byPool = new Map<string, GeckoPoolMarketData>();
-  for (const result of results) if (result.status === 'fulfilled') for (const item of result.value) byPool.set(item.address, item);
-  const complete = unique.every((address) => {
-    const item = byPool.get(address);
-    return item?.volume24h !== null && item?.volume24h !== undefined && item?.baseTokenPriceUsd !== null;
-  });
-  return { byPool, complete, poolsReturned: byPool.size };
+  let batchesSucceeded = 0;
+  for (const result of results) {
+    if (result.status !== 'fulfilled') continue;
+    batchesSucceeded += 1;
+    for (const item of result.value) byPool.set(item.address, item);
+  }
+  return {
+    byPool,
+    complete: unique.every((address) => isComplete(byPool.get(address))),
+    poolsReturned: byPool.size,
+    batchesSucceeded,
+    batchesAttempted: batches.length,
+  };
 }
