@@ -17,6 +17,8 @@ export default function MainDashboardPage() {
   const hasData = !isLoading && !error && pools.length > 0;
   const { totalTVL, avgFeeTier } = dashboardMetrics;
   const poolDataStatus = streamStatus.poolDataStatus;
+  const gmgnPools = pools.filter((pool) => pool.gmgn !== null).length;
+  const gmgnEnabled = gmgnPools > 0;
 
   const statusLabel = isLoading
     ? 'CONNECTING'
@@ -126,12 +128,12 @@ export default function MainDashboardPage() {
               <div>
                 <h2 className="text-base font-semibold text-foreground">Realtime Market Data</h2>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  V1 uses verified Robinhood subgraph pool snapshots. Historical swap analytics will be added separately.
+                  Verified Robinhood subgraph snapshots enriched with external token metadata when available.
                 </p>
               </div>
               <span className="text-xs text-muted-foreground">REST · 30s refresh</span>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
               <div className="rounded-lg bg-muted/30 border border-border p-3">
                 <p className="text-xs text-muted-foreground">Pool discovery</p>
                 <p className="text-sm font-semibold text-foreground mt-1">{pools.length} pools</p>
@@ -139,6 +141,12 @@ export default function MainDashboardPage() {
               <div className="rounded-lg bg-muted/30 border border-border p-3">
                 <p className="text-xs text-muted-foreground">Data source</p>
                 <p className="text-sm font-semibold text-foreground mt-1">Robinhood Subgraph</p>
+              </div>
+              <div className={`rounded-lg border p-3 ${gmgnEnabled ? 'bg-positive-subtle border-positive/20' : 'bg-muted/30 border-border'}`}>
+                <p className="text-xs text-muted-foreground">GMGN enrichment</p>
+                <p className={`text-sm font-semibold mt-1 ${gmgnEnabled ? 'text-positive' : 'text-foreground'}`}>
+                  {isLoading ? '…' : gmgnEnabled ? `${gmgnPools} pools enriched` : 'Not available'}
+                </p>
               </div>
               <div className="rounded-lg bg-muted/30 border border-border p-3">
                 <p className="text-xs text-muted-foreground">Chain</p>
@@ -153,7 +161,7 @@ export default function MainDashboardPage() {
             <div>
               <h2 className="text-base font-semibold text-foreground">Pool Explorer</h2>
               <p className="text-xs text-muted-foreground mt-0.5">
-                Sort and inspect live pool metadata. Unsupported historical metrics are shown as N/A rather than estimated.
+                Live pool metadata with GMGN token enrichment where the upstream API returns data.
               </p>
             </div>
             <a href="/pool-scanner" className="btn-ghost text-xs">Full Scanner →</a>
@@ -164,8 +172,8 @@ export default function MainDashboardPage() {
         <div className="rounded-xl border border-warning/20 bg-warning-subtle p-4">
           <p className="text-xs text-warning/80 leading-relaxed">
             <span className="font-semibold text-warning">V1 DATA NOTICE:</span>{' '}
-            Binara V1 only presents values currently supported by the verified Robinhood subgraph integration.
-            Historical volume, APR, volatility, alerts, and per-bin liquidity are intentionally not fabricated when the underlying data is unavailable.
+            Binara presents verified source values and clearly marks unavailable metrics as N/A.
+            GMGN enrichment is supplementary token metadata; it does not replace authoritative pool TVL or DLMM state.
             This dashboard is informational and is not financial advice.
           </p>
         </div>
