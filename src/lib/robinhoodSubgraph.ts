@@ -1,9 +1,4 @@
-/** Minimal read-only Robinhood Chain data source.
- *
- * Phase 1 intentionally uses only the Kingdom GraphQL subgraph. No RPC,
- * factory scanning, websocket stream, or in-memory indexer is required to
- * discover pools.
- */
+/** Minimal read-only Robinhood Chain data source. */
 
 export const ROBINHOOD_CHAIN_ID = 4663;
 export const ROBINHOOD_SUBGRAPH_URL =
@@ -13,20 +8,19 @@ const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'.toLowerCase();
 
 export interface RobinhoodSubgraphPool {
   id: string;
-  // Kingdom exposes tokenX/tokenY as scalar token addresses on this schema.
-  tokenX: string;
-  tokenY: string;
-  binStep: number;
-  activeId: number | null;
-  reserveX: string;
-  reserveY: string;
-  totalValueLockedUSD: string | null;
-  volumeUSD: string | null;
-  feesUSD: string | null;
-  txCount: number;
-  createdAtBlockNumber: number;
-  createdAtTimestamp: number;
-  isAlive: boolean;
+  tokenX?: string;
+  tokenY?: string;
+  binStep?: number;
+  activeId?: number | null;
+  reserveX?: string;
+  reserveY?: string;
+  totalValueLockedUSD?: string | null;
+  volumeUSD?: string | null;
+  feesUSD?: string | null;
+  txCount?: number;
+  createdAtBlockNumber?: number;
+  createdAtTimestamp?: number;
+  isAlive?: boolean;
 }
 
 interface GraphQLResponse<T> {
@@ -37,7 +31,6 @@ interface GraphQLResponse<T> {
 async function query<T>(body: string, variables: Record<string, unknown> = {}): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
-
   try {
     const response = await fetch(ROBINHOOD_SUBGRAPH_URL, {
       method: 'POST',
@@ -46,12 +39,9 @@ async function query<T>(body: string, variables: Record<string, unknown> = {}): 
       cache: 'no-store',
       signal: controller.signal,
     });
-
     if (!response.ok) throw new Error(`Subgraph HTTP ${response.status}`);
     const result = (await response.json()) as GraphQLResponse<T>;
-    if (result.errors?.length) {
-      throw new Error(result.errors[0]?.message || 'Subgraph query failed');
-    }
+    if (result.errors?.length) throw new Error(result.errors[0]?.message || 'Subgraph query failed');
     if (!result.data) throw new Error('Subgraph returned no data');
     return result.data;
   } finally {
@@ -63,57 +53,17 @@ export async function getPools(limit = 500): Promise<RobinhoodSubgraphPool[]> {
   const safeLimit = Math.min(500, Math.max(1, limit));
   const data = await query<{ DLMMPool?: RobinhoodSubgraphPool[] }>(
     `query GetPools($chainId: Int!, $limit: Int!) {
-      DLMMPool(
-        where: { chainId: { _eq: $chainId } }
-        limit: $limit
-      ) {
+      DLMMPool(where: { chainId: { _eq: $chainId } } limit: $limit) {
         id
-        tokenX
-        tokenY
-        binStep
-        activeId
-        reserveX
-        reserveY
-        totalValueLockedUSD
-        volumeUSD
-        feesUSD
-        txCount
-        createdAtBlockNumber
-        createdAtTimestamp
-        isAlive
       }
     }`,
     { chainId: ROBINHOOD_CHAIN_ID, limit: safeLimit },
   );
-
   return data.DLMMPool ?? [];
 }
 
 export async function checkSubgraph(): Promise<{ pools: number }> {
-  const pools = await getPools(1);
-  return { pools: pools.length };
-}
-
-function rawAmount(value: string | null | undefined, decimals: number): number {
-  if (!value || !/^\d+$/.test(value)) return 0;
-  try {
-    const result = Number(BigInt(value)) / 10 ** decimals;
-    return Number.isFinite(result) ? result : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function priceFromBin(activeId: number | null, binStep: number, dx: number, dy: number): number | null {
-  if (activeId == null || !Number.isFinite(activeId) || !Number.isFinite(binStep)) return null;
-  const base = 1 + binStep / 10_000;
-  const raw = Math.pow(base, activeId - 8_388_608);
-  const price = raw * 10 ** (dx - dy);
-  return Number.isFinite(price) && price > 0 ? price : null;
-}
-
-function stable(address: string): boolean {
-  return address.toLowerCase() === USDG;
+  return { pools: (await getPools(1)).length };
 }
 
 function shortAddress(address: string): string {
@@ -122,64 +72,46 @@ function shortAddress(address: string): string {
 }
 
 export function toLivePool(pool: RobinhoodSubgraphPool) {
-  // Token metadata is intentionally deferred until Phase 2. The subgraph's
-  // tokenX/tokenY fields are addresses, so assume 18 decimals for the
-  // preliminary price/reserve display rather than inventing token metadata.
-  const dx = 18;
-  const dy = 18;
   const tokenX = String(pool.tokenX || '');
   const tokenY = String(pool.tokenY || '');
-  const price = priceFromBin(pool.activeId, Number(pool.binStep), dx, dy);
-  const subgraphTvl = pool.totalValueLockedUSD == null ? null : Number(pool.totalValueLockedUSD);
-  const tvl = Number.isFinite(subgraphTvl) && subgraphTvl >= 0 ? subgraphTvl : null;
-  const reserveX = rawAmount(pool.reserveX, dx);
-  const reserveY = rawAmount(pool.reserveY, dy);
-  const tokenASymbol = shortAddress(tokenX);
-  const tokenBSymbol = shortAddress(tokenY);
-
-  // volumeUSD is cumulative in the pool entity, so it is deliberately NOT
-  // presented as a fake 24h volume. Phase 2 can add a real Swap query.
-  const volume24h = null;
-  const volumeToTVL = tvl && tvl > 0 ? 0 : 0;
-  const score = tvl != null ? Math.min(100, Math.round(40 + Math.log10(Math.max(1, tvl)) * 5)) : 35;
-
+  const tvl = pool.totalValueLockedUSD == null ? null : Number(pool.totalValueLockedUSD);
   return {
     id: pool.id,
     address: pool.id,
-    pair: `${tokenASymbol}/${tokenBSymbol}`,
-    tokenA: tokenASymbol,
-    tokenB: tokenBSymbol,
+    pair: `${shortAddress(tokenX)}/${shortAddress(tokenY)}`,
+    tokenA: shortAddress(tokenX),
+    tokenB: shortAddress(tokenY),
     tokenAAddress: tokenX,
     tokenBAddress: tokenY,
-    decimalsA: dx,
-    decimalsB: dy,
+    decimalsA: 18,
+    decimalsB: 18,
     protocol: 'Robinhood DLMM',
-    currentPrice: price,
+    currentPrice: null,
     priceChange24h: null,
     binStep: Number(pool.binStep) || 0,
-    activeBin: pool.activeId,
+    activeBin: pool.activeId ?? null,
     fee: (Number(pool.binStep) || 0) * 0.01,
-    tvl,
+    tvl: Number.isFinite(tvl) && tvl >= 0 ? tvl : null,
     reserveX: pool.reserveX || '0',
     reserveY: pool.reserveY || '0',
     volume1h: null,
     volume6h: null,
-    volume24h,
+    volume24h: null,
     volumeRaw24h: 0,
-    volumeToTVL,
+    volumeToTVL: 0,
     volatility: 0,
-    analyticsScore: score,
+    analyticsScore: 35,
     riskLevel: 'MEDIUM' as const,
     estimatedAPR: null,
     timeInRange: null,
     swapCount24h: 0,
     swapCount1h: 0,
-    status: pool.isAlive ? 'active' as const : 'inactive' as const,
+    status: pool.isAlive === false ? 'inactive' as const : 'active' as const,
     createdBlock: Number(pool.createdAtBlockNumber) || 0,
     createdAt: pool.createdAtTimestamp ? new Date(Number(pool.createdAtTimestamp) * 1000).toISOString() : null,
     updatedAt: new Date().toISOString(),
-    stablePair: stable(tokenX) || stable(tokenY),
-    reserveXHuman: reserveX,
-    reserveYHuman: reserveY,
+    stablePair: tokenX.toLowerCase() === USDG || tokenY.toLowerCase() === USDG,
+    reserveXHuman: 0,
+    reserveYHuman: 0,
   };
 }
