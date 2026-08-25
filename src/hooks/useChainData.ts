@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { LivePool } from '@/lib/liveTypes';
+import { getPoolVisibility, LivePool, PoolVisibility } from '@/lib/liveTypes';
 
 export type DataStatus = 'connecting' | 'live' | 'stale' | 'error';
 export interface ChainStatus { status: DataStatus; blockNumber: number | null; chainId: number | null; lastUpdated: number | null; error: string | null; }
@@ -38,7 +38,7 @@ export function useChainStatus() {
   return { chainStatus, refetch: fetchStatus };
 }
 
-export function usePoolsData(intervalMs = POOL_INTERVAL_MS) {
+export function usePoolsData(intervalMs = POOL_INTERVAL_MS, visibilityMode: PoolVisibility = 'active') {
   const [pools, setPools] = useState<LivePool[]>([]);
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetrics>(() => computeDashboardMetrics([]));
   const [isLoading, setIsLoading] = useState(true);
@@ -49,12 +49,12 @@ export function usePoolsData(intervalMs = POOL_INTERVAL_MS) {
     try {
       const res = await fetch('/api/chain/pools', { cache: 'no-store' }); const data = await res.json();
       if (!res.ok || data.error) { setError(data.error || 'Unable to retrieve live Robinhood Chain data.'); setIsLoading(false); return; }
-      // Main scanner policy: only pools with explicit usable liquidity are shown.
-      // Unresolved pools are intentionally kept discoverable through /pool-search.
-      const livePools: LivePool[] = (data.pools || []).filter((pool: LivePool) => pool.status !== 'inactive' && pool.tvl !== null && pool.tvl > 0);
-      setPools(livePools); setDashboardMetrics(computeDashboardMetrics(livePools)); setLastUpdated(Date.now()); setIndexerStatus(data.indexer?.status ?? null); setError(null);
+      const rawPools: LivePool[] = data.pools || [];
+      const classified = rawPools.map((pool) => ({ ...pool, visibility: getPoolVisibility(pool) }));
+      const visiblePools = classified.filter((pool) => visibilityMode === 'active' ? pool.visibility === 'active' : pool.visibility === visibilityMode);
+      setPools(visiblePools); setDashboardMetrics(computeDashboardMetrics(classified.filter((p) => p.visibility === 'active'))); setLastUpdated(Date.now()); setIndexerStatus(data.indexer?.status ?? null); setError(null);
     } catch { setError('Unable to retrieve live Robinhood Chain data.'); } finally { setIsLoading(false); }
-  }, []);
+  }, [visibilityMode]);
   useEffect(() => { fetchPools(); const id = setInterval(fetchPools, intervalMs); return () => clearInterval(id); }, [fetchPools, intervalMs]);
   const [secondsAgo, setSecondsAgo] = useState<number | null>(null);
   useEffect(() => { const id = setInterval(() => { if (lastUpdated) setSecondsAgo(Math.floor((Date.now() - lastUpdated) / 1000)); }, 1000); return () => clearInterval(id); }, [lastUpdated]);
@@ -62,7 +62,9 @@ export function usePoolsData(intervalMs = POOL_INTERVAL_MS) {
 }
 
 export function useSinglePoolData(poolAddress?: string, intervalMs = 15_000) {
-  const { pools, isLoading, error, secondsAgo, refetch } = usePoolsData(intervalMs);
-  const pool = poolAddress ? pools.find((p) => p.address.toLowerCase() === poolAddress.toLowerCase()) : pools[0];
+  const { pools, isLoading, error, secondsAgo, refetch } = usePoolsData(intervalMs, 'unresolved');
+  const { pools: activePools } = usePoolsData(intervalMs, 'active');
+  const allPools = [...activePools, ...pools];
+  const pool = poolAddress ? allPools.find((p) => p.address.toLowerCase() === poolAddress.toLowerCase()) : activePools[0] ?? null;
   return { pool: pool ?? null, isLoading, error, secondsAgo, refetch };
 }
