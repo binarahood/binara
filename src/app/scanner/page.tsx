@@ -3,23 +3,8 @@
 import React, { useMemo, useState } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { LivePool, fmtUSD, fmtPct } from '@/lib/liveTypes';
+import { getOpportunityScore } from '@/lib/opportunityScore';
 import { usePoolsData } from '@/hooks/useChainData';
-
-function opportunityScore(pool: LivePool): number | null {
-  const values = [pool.tvl, pool.volume24h, pool.volumeToTVL, pool.swapCount24h];
-  if (values.some((v) => v === null || !Number.isFinite(v))) return null;
-  if ((pool.tvl ?? 0) <= 0 || (pool.volume24h ?? 0) < 0 || (pool.volumeToTVL ?? 0) < 0) return null;
-
-  // Score is a ranking aid, not a return estimate. Give liquidity a meaningful
-  // weight so tiny-TVL pools cannot dominate purely because their Vol/TVL ratio
-  // is unusually high.
-  const efficiencyScore = Math.min(35, (pool.volumeToTVL! / 10) * 35);
-  const volumeScore = Math.min(25, Math.log10(pool.volume24h! + 1) * 4.5);
-  const liquidityScore = Math.min(25, (Math.log10(pool.tvl! + 1) / Math.log10(100_000 + 1)) * 25);
-  const activityScore = Math.min(15, pool.swapCount24h! / 100);
-
-  return Math.min(100, Math.round(efficiencyScore + volumeScore + liquidityScore + activityScore));
-}
 
 function ScoreBadge({ score }: { score: number | null }) {
   if (score === null) return <span className="text-xs font-semibold text-muted-foreground">INSUFFICIENT DATA</span>;
@@ -43,7 +28,7 @@ export default function ScannerPage() {
       .filter((p) => p.status === 'active')
       .filter((p) => (p.tvl ?? -1) >= minTVL && (p.volume24h ?? -1) >= minVolume)
       .filter((p) => !q || p.pair.toLowerCase().includes(q) || p.address.toLowerCase().includes(q))
-      .map((pool) => ({ pool, score: opportunityScore(pool) }))
+      .map((pool) => ({ pool, score: getOpportunityScore(pool) }))
       .filter((row): row is { pool: LivePool; score: number } => row.score !== null)
       .sort((a, b) => b.score - a.score);
   }, [pools, search, minTVL, minVolume]);
