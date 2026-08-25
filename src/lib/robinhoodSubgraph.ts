@@ -13,8 +13,9 @@ const USDG = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'.toLowerCase();
 
 export interface RobinhoodSubgraphPool {
   id: string;
-  tokenX: { id: string; symbol: string; decimals: number };
-  tokenY: { id: string; symbol: string; decimals: number };
+  // Kingdom exposes tokenX/tokenY as scalar token addresses on this schema.
+  tokenX: string;
+  tokenY: string;
   binStep: number;
   activeId: number | null;
   reserveX: string;
@@ -67,8 +68,8 @@ export async function getPools(limit = 500): Promise<RobinhoodSubgraphPool[]> {
         limit: $limit
       ) {
         id
-        tokenX { id symbol decimals }
-        tokenY { id symbol decimals }
+        tokenX
+        tokenY
         binStep
         activeId
         reserveX
@@ -115,14 +116,26 @@ function stable(address: string): boolean {
   return address.toLowerCase() === USDG;
 }
 
+function shortAddress(address: string): string {
+  const value = String(address || '');
+  return value.length > 12 ? `${value.slice(0, 6)}…${value.slice(-4)}` : value || 'UNKNOWN';
+}
+
 export function toLivePool(pool: RobinhoodSubgraphPool) {
-  const dx = Number(pool.tokenX.decimals) || 18;
-  const dy = Number(pool.tokenY.decimals) || 18;
+  // Token metadata is intentionally deferred until Phase 2. The subgraph's
+  // tokenX/tokenY fields are addresses, so assume 18 decimals for the
+  // preliminary price/reserve display rather than inventing token metadata.
+  const dx = 18;
+  const dy = 18;
+  const tokenX = String(pool.tokenX || '');
+  const tokenY = String(pool.tokenY || '');
   const price = priceFromBin(pool.activeId, Number(pool.binStep), dx, dy);
   const subgraphTvl = pool.totalValueLockedUSD == null ? null : Number(pool.totalValueLockedUSD);
   const tvl = Number.isFinite(subgraphTvl) && subgraphTvl >= 0 ? subgraphTvl : null;
   const reserveX = rawAmount(pool.reserveX, dx);
   const reserveY = rawAmount(pool.reserveY, dy);
+  const tokenASymbol = shortAddress(tokenX);
+  const tokenBSymbol = shortAddress(tokenY);
 
   // volumeUSD is cumulative in the pool entity, so it is deliberately NOT
   // presented as a fake 24h volume. Phase 2 can add a real Swap query.
@@ -133,11 +146,11 @@ export function toLivePool(pool: RobinhoodSubgraphPool) {
   return {
     id: pool.id,
     address: pool.id,
-    pair: `${pool.tokenX.symbol || pool.tokenX.id.slice(0, 6)}/${pool.tokenY.symbol || pool.tokenY.id.slice(0, 6)}`,
-    tokenA: pool.tokenX.symbol || 'UNKNOWN',
-    tokenB: pool.tokenY.symbol || 'UNKNOWN',
-    tokenAAddress: pool.tokenX.id,
-    tokenBAddress: pool.tokenY.id,
+    pair: `${tokenASymbol}/${tokenBSymbol}`,
+    tokenA: tokenASymbol,
+    tokenB: tokenBSymbol,
+    tokenAAddress: tokenX,
+    tokenBAddress: tokenY,
     decimalsA: dx,
     decimalsB: dy,
     protocol: 'Robinhood DLMM',
@@ -165,7 +178,7 @@ export function toLivePool(pool: RobinhoodSubgraphPool) {
     createdBlock: Number(pool.createdAtBlockNumber) || 0,
     createdAt: pool.createdAtTimestamp ? new Date(Number(pool.createdAtTimestamp) * 1000).toISOString() : null,
     updatedAt: new Date().toISOString(),
-    stablePair: stable(pool.tokenX.id) || stable(pool.tokenY.id),
+    stablePair: stable(tokenX) || stable(tokenY),
     reserveXHuman: reserveX,
     reserveYHuman: reserveY,
   };
