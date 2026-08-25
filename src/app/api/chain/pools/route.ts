@@ -21,6 +21,7 @@ export async function GET() {
       const marketData = market.byPool.get(address);
       const tvl = base.tvl;
       const volume24h = marketData?.volume24h ?? null;
+      const volumeToTVL = tvl !== null && tvl > 0 && volume24h !== null ? volume24h / tvl : null;
 
       return {
         ...base,
@@ -29,7 +30,7 @@ export async function GET() {
         volume6h: marketData?.volume6h ?? null,
         volume24h,
         volumeRaw24h: volume24h ?? 0,
-        volumeToTVL: tvl !== null && tvl > 0 && volume24h !== null ? volume24h / tvl : 0,
+        volumeToTVL,
         swapCount1h: marketData?.swapCount1h ?? null,
         swapCount24h: marketData?.swapCount24h ?? null,
       };
