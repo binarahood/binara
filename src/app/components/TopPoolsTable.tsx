@@ -3,7 +3,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { LivePool, fmtUSD } from '@/lib/liveTypes';
-import { RiskBadge, FeeBadge } from '@/components/ui/Badge';
+import { FeeBadge } from '@/components/ui/Badge';
 import Icon from '@/components/ui/AppIcon';
 import { usePoolsData } from '@/hooks/useChainData';
 
@@ -87,7 +87,7 @@ export default function TopPoolsTable() {
                   {pool.status.toUpperCase()}
                 </span>
               </td>
-              <td className="table-row-cell"><RiskBadge level={pool.riskLevel} /></td>
+              <td className="table-row-cell text-xs text-muted-foreground">N/A</td>
               <td className="table-row-cell">
                 <Link
                   href={`/pool-detail?address=${pool.address}`}
