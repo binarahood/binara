@@ -2,6 +2,8 @@
  * Shared Pool type for the live API response.
  * Live/derived metrics are nullable when the verified source does not provide them.
  */
+export type PoolVisibility = 'active' | 'unresolved' | 'inactive';
+
 export interface LivePool {
   id: string;
   address: string;
@@ -52,9 +54,16 @@ export interface LivePool {
   swapCount24h: number | null;
   swapCount1h: number | null;
   status: 'active' | 'inactive';
+  /** UI/data-contract classification. Derived from verified pool status + TVL availability. */
+  visibility?: PoolVisibility;
   createdBlock: number;
   createdAt: string | null;
   updatedAt: string;
+}
+
+export function getPoolVisibility(pool: Pick<LivePool, 'status' | 'tvl'>): PoolVisibility {
+  if (pool.status === 'inactive') return 'inactive';
+  return pool.tvl !== null && pool.tvl > 0 ? 'active' : 'unresolved';
 }
 
 /** Display helpers. Missing verified data is rendered as an em dash rather than a misleading zero. */
