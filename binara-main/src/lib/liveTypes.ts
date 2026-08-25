@@ -5,6 +5,8 @@ export interface LivePool {
   pair: string;
   tokenA: string | null;
   tokenB: string | null;
+  tokenAName?: string | null;
+  tokenBName?: string | null;
   tokenAAddress: string;
   tokenBAddress: string;
   decimalsA: number | null;
@@ -19,6 +21,7 @@ export interface LivePool {
   fee: number | null;
 
   tvl: number | null;
+  tvlSource?: 'subgraph' | 'geckoterminal' | 'onchain-dlmm-reserves' | 'gmgn-token-liquidity' | 'unresolved';
   reserveX: string | null;
   reserveY: string | null;
 
@@ -37,6 +40,16 @@ export interface LivePool {
   swapCount24h: number | null;
   swapCount1h: number | null;
   status: 'active' | 'inactive';
+
+  gmgn?: {
+    symbol: string | null;
+    name: string | null;
+    priceUsd: number | null;
+    liquidityUsd: number | null;
+    holderCount: number | null;
+    mainPool: string | null;
+    creationTimestamp: number | null;
+  } | null;
 
   createdBlock: number | null;
   createdAt: string | null;
