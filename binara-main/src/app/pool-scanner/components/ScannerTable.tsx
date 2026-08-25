@@ -28,6 +28,12 @@ function scoreClass(score: number | null) {
   return 'bg-negative-subtle text-negative';
 }
 
+function displayPair(pool: LivePool) {
+  const a = pool.tokenAName || pool.tokenA || shortAddress(pool.tokenAAddress);
+  const b = pool.tokenBName || pool.tokenB || shortAddress(pool.tokenBAddress);
+  return a && b ? `${a} / ${b}` : pool.pair || 'Unknown Pool';
+}
+
 export default function ScannerTable({ pools, onSelect, selectedId }: { pools: LivePool[]; onSelect: (pool: LivePool) => void; selectedId?: string }) {
   const [sortKey, setSortKey] = useState<SortKey>('analyticsScore');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -43,9 +49,10 @@ export default function ScannerTable({ pools, onSelect, selectedId }: { pools: L
   return <div className="overflow-x-auto"><table className="w-full border-collapse"><thead><tr className="border-b border-border"><th className="table-header-cell">#</th><th className="table-header-cell">Pool / Token</th>{headers.map((h) => <th key={h.key} className="table-header-cell cursor-pointer" onClick={() => handleSort(h.key)}><span className="flex items-center gap-1">{h.label}<SortIcon k={h.key} /></span></th>)}<th className="table-header-cell">GMGN Liq.</th><th className="table-header-cell">Holders</th><th className="table-header-cell">Price</th><th className="table-header-cell">Bin Step</th><th className="table-header-cell">Status</th><th className="table-header-cell">Action</th></tr></thead><tbody>{sorted.map((pool, idx) => {
     const tokenName = pool.gmgn?.name || pool.tokenAName || pool.tokenBName;
     const tokenSymbol = pool.gmgn?.symbol || pool.tokenA || pool.tokenB;
+    const pairLabel = displayPair(pool);
     return <tr key={pool.id} onClick={() => onSelect(pool)} className={`border-b border-border/50 cursor-pointer transition-colors group ${selectedId === pool.id ? 'bg-primary/5 border-primary/20' : 'hover:bg-muted/30'}`}>
       <td className="table-row-cell text-muted-foreground font-mono-nums text-xs">{idx + 1}</td>
-      <td className="table-row-cell min-w-[220px]"><div><div className="flex items-center gap-2"><p className="text-sm font-semibold text-foreground">{pool.pair}</p>{pool.gmgn && <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold bg-positive-subtle text-positive">GMGN</span>}</div><p className="text-xs text-muted-foreground mt-0.5">{tokenName || 'Token metadata unavailable'}{tokenSymbol ? ` · ${tokenSymbol}` : ''}</p><p className="text-[11px] text-muted-foreground/60 mt-0.5">{pool.protocol} · {shortAddress(pool.address)}</p></div></td>
+      <td className="table-row-cell min-w-[220px]"><div><div className="flex items-center gap-2"><p className="text-sm font-semibold text-foreground">{pairLabel}</p>{pool.gmgn && <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold bg-positive-subtle text-positive">GMGN</span>}</div><p className="text-xs text-muted-foreground mt-0.5">{tokenName || 'Token metadata unavailable'}{tokenSymbol ? ` · ${tokenSymbol}` : ''}</p><p className="text-[11px] text-muted-foreground/60 mt-0.5">{pool.protocol} · {shortAddress(pool.address)}</p></div></td>
       <td className="table-row-cell"><span className={`inline-flex min-w-10 justify-center px-2 py-0.5 rounded-md text-xs font-bold font-mono-nums ${scoreClass(pool.analyticsScore)}`}>{pool.analyticsScore === null ? 'N/A' : pool.analyticsScore}</span></td>
       <td className="table-row-cell font-mono-nums text-foreground">{fmtUSD(pool.tvl)}</td>
       <td className="table-row-cell font-mono-nums font-semibold">{fmtUSD(pool.volume24h)}</td>
@@ -57,7 +64,7 @@ export default function ScannerTable({ pools, onSelect, selectedId }: { pools: L
       <td className="table-row-cell font-mono-nums">{pool.currentPrice === null ? (pool.gmgn?.priceUsd !== null && pool.gmgn?.priceUsd !== undefined ? pool.gmgn.priceUsd.toPrecision(6) : 'N/A') : pool.currentPrice.toFixed(8)}</td>
       <td className="table-row-cell font-mono-nums">{pool.binStep === null ? 'N/A' : pool.binStep}</td>
       <td className="table-row-cell"><span className={`inline-flex px-2 py-0.5 rounded-md text-xs font-semibold ${pool.status === 'active' ? 'bg-positive-subtle text-positive' : 'bg-muted text-muted-foreground'}`}>{pool.status}</span></td>
-      <td className="table-row-cell"><div className="flex items-center gap-1 opacity-0 group-hover:opacity-100"><button onClick={(e) => { e.stopPropagation(); onSelect(pool); }} className="btn-ghost text-xs px-2 py-1" title="Inspect live data"><Icon name="ChartBarIcon" size={13} /></button><Link href={`/pool-detail?address=${pool.address}`} onClick={(e) => e.stopPropagation()} className="btn-ghost text-xs px-2 py-1" title="Open pool detail"><Icon name="ArrowTopRightOnSquareIcon" size={13} /></Link></div></td>
+      <td className="table-row-cell"><div className="flex items-center gap-1 opacity-0 group-hover:opacity-100"><button onClick={(e) => { e.stopPropagation(); onSelect(pool); }} className="btn-ghost text-xs px-2 py-1" title="Inspect live data"><Icon name="ChartBarIcon" size={13} /></button><Link href={`/pool-detail?address=${encodeURIComponent(pool.address)}`} onClick={(e) => e.stopPropagation()} className="btn-ghost text-xs px-2 py-1" title="Open pool detail"><Icon name="ArrowTopRightOnSquareIcon" size={13} /></Link></div></td>
     </tr>;
   })}</tbody></table><div className="flex items-center justify-between px-3 py-2 border-t border-border"><p className="text-xs text-muted-foreground/60">Score ranks pools using verified TVL, 24h volume, Vol/TVL and swap activity. N/A means a required input is unavailable.</p><p className="text-xs text-muted-foreground font-mono-nums">{pools.length} pool{pools.length !== 1 ? 's' : ''}</p></div></div>;
 }
