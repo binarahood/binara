@@ -39,8 +39,14 @@ export function useChainStatus() {
 }
 
 function mergePools(basePools: LivePool[], enrichedPools: LivePool[]): LivePool[] {
-  const enrichedByAddress = new Map(enrichedPools.map((pool) => [pool.address.toLowerCase(), pool]));
-  return basePools.map((base) => enrichedByAddress.get(base.address.toLowerCase()) ? { ...base, ...enrichedByAddress.get(base.address.toLowerCase()) } : base);
+  const enrichedByAddress = new Map<string, LivePool>();
+  for (const pool of enrichedPools) {
+    for (const key of [pool.address, pool.id].filter(Boolean).map((value) => value.toLowerCase())) enrichedByAddress.set(key, pool);
+  }
+  return basePools.map((base) => {
+    const enriched = enrichedByAddress.get(base.address.toLowerCase()) ?? enrichedByAddress.get(base.id.toLowerCase());
+    return enriched ? { ...base, ...enriched, id: base.id, address: base.address } : base;
+  });
 }
 
 export function usePoolsData(intervalMs = POOL_INTERVAL_MS, visibilityMode: PoolVisibility | 'all' = 'active') {
@@ -50,7 +56,15 @@ export function usePoolsData(intervalMs = POOL_INTERVAL_MS, visibilityMode: Pool
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [indexerStatus, setIndexerStatus] = useState<string | null>(null);
+  const basePoolsRef = useRef<LivePool[]>([]);
   const enrichmentInFlight = useRef(false);
+
+  const publishPools = useCallback((allPools: LivePool[]) => {
+    const classified = allPools.map((pool) => ({ ...pool, visibility: getPoolVisibility(pool) }));
+    const visible = classified.filter((pool) => visibilityMode === 'all' || pool.visibility === visibilityMode);
+    setPools(visible);
+    setDashboardMetrics(computeDashboardMetrics(classified.filter((p) => p.visibility === 'active')));
+  }, [visibilityMode]);
 
   const fetchEnrichment = useCallback(async () => {
     if (enrichmentInFlight.current) return;
@@ -60,31 +74,26 @@ export function usePoolsData(intervalMs = POOL_INTERVAL_MS, visibilityMode: Pool
       const data = await res.json();
       if (!res.ok || data.error) return;
       const enriched = (data.pools || []) as LivePool[];
-      setPools((current) => {
-        const merged = mergePools(current, enriched).map((pool) => ({ ...pool, visibility: getPoolVisibility(pool) }));
-        const visible = merged.filter((pool) => visibilityMode === 'all' || pool.visibility === visibilityMode);
-        setDashboardMetrics(computeDashboardMetrics(merged.filter((p) => p.visibility === 'active')));
-        setLastUpdated(Date.now());
-        return visible;
-      });
+      const merged = mergePools(basePoolsRef.current, enriched);
+      if (merged.length > 0) { basePoolsRef.current = merged; publishPools(merged); setLastUpdated(Date.now()); }
     } catch {
       // Enrichment is supplementary; base pool discovery remains healthy when an upstream provider is slow or unavailable.
     } finally {
       enrichmentInFlight.current = false;
     }
-  }, [visibilityMode]);
+  }, [publishPools]);
 
   const fetchPools = useCallback(async () => {
     try {
       const res = await fetch('/api/chain/pools', { cache: 'no-store' }); const data = await res.json();
       if (!res.ok || data.error) { setError(data.error || 'Unable to retrieve live Robinhood Chain data.'); setIsLoading(false); return; }
       const rawPools: LivePool[] = data.pools || [];
-      const classified = rawPools.map((pool) => ({ ...pool, visibility: getPoolVisibility(pool) }));
-      const visiblePools = classified.filter((pool) => visibilityMode === 'all' || pool.visibility === visibilityMode);
-      setPools(visiblePools); setDashboardMetrics(computeDashboardMetrics(classified.filter((p) => p.visibility === 'active'))); setLastUpdated(Date.now()); setIndexerStatus(data.indexer?.status ?? null); setError(null); setIsLoading(false);
+      basePoolsRef.current = rawPools;
+      publishPools(rawPools);
+      setLastUpdated(Date.now()); setIndexerStatus(data.indexer?.status ?? null); setError(null); setIsLoading(false);
       void fetchEnrichment();
     } catch { setError('Unable to retrieve live Robinhood Chain data.'); setIsLoading(false); }
-  }, [fetchEnrichment, visibilityMode]);
+  }, [fetchEnrichment, publishPools]);
 
   useEffect(() => { fetchPools(); const id = setInterval(fetchPools, intervalMs); return () => clearInterval(id); }, [fetchPools, intervalMs]);
   const [secondsAgo, setSecondsAgo] = useState<number | null>(null);
