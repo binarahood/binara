@@ -47,7 +47,6 @@ function WalletChooser({ open, wallets, isConnecting, chooseWallet, close }: { o
 }
 
 export default function Topbar() {
-  const [searchOpen, setSearchOpen] = useState(false);
   const [walletOpen, setWalletOpen] = useState(false);
   const [walletChooserOpen, setWalletChooserOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -67,8 +66,6 @@ export default function Topbar() {
       <header className="h-14 sm:h-16 flex items-center justify-between gap-2 px-3 sm:px-6 border-b border-border bg-card/80 backdrop-blur-sm sticky top-0 z-30 min-w-0">
         <div className="flex items-center gap-1.5 sm:gap-2 text-sm min-w-0 overflow-hidden"><span className="hidden sm:inline text-muted-foreground">BINARA</span><Icon name="ChevronRightIcon" size={14} className="hidden sm:block text-muted-foreground/50" /><span className="text-foreground font-medium truncate">Analytics Terminal</span><span className="ml-1 sm:ml-2 flex-shrink-0"><DataStatusBadge /></span></div>
         <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
-          <button suppressHydrationWarning onClick={() => setSearchOpen(!searchOpen)} className="btn-ghost px-2 sm:px-3" title="Search pools (Cmd+K)"><Icon name="MagnifyingGlassIcon" size={16} />{!searchOpen && <span className="hidden md:flex items-center gap-1 text-xs text-muted-foreground/60"><kbd className="px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-xs">⌘K</kbd></span>}</button>
-          <button suppressHydrationWarning className="btn-ghost px-2 sm:px-3 relative" title="Alerts (2 active)"><Icon name="BellIcon" size={16} /><span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-warning" /></button>
           {chainStatus.blockNumber && <div className="hidden xl:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted/40 border border-border"><Icon name="CubeIcon" size={12} className="text-muted-foreground" /><span className="text-xs text-muted-foreground font-mono-nums">#{chainStatus.blockNumber.toLocaleString()}</span></div>}
           {isConnected && !isCorrectChain && <button suppressHydrationWarning onClick={switchToRobinhoodChain} disabled={isSwitchingChain} className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg bg-destructive/10 border border-destructive text-destructive text-xs font-semibold disabled:opacity-60" title={`Wrong network (chain ${chainId}). Click to switch to Robinhood Chain (4663)`}><Icon name="ExclamationTriangleIcon" size={13} /><span className="hidden sm:inline">{isSwitchingChain ? 'Switching…' : 'Wrong Network'}</span></button>}
           {!isConnected ? <button suppressHydrationWarning onClick={() => setWalletChooserOpen(true)} disabled={isConnecting} className="btn-primary text-xs px-2.5 sm:px-3 py-1.5 disabled:opacity-60"><Icon name="WalletIcon" size={14} /><span className="hidden sm:inline">{isConnecting ? 'Connecting…' : 'Connect Wallet'}</span></button> : <div className="relative" ref={dropdownRef}>
