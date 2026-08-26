@@ -4,6 +4,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 
 export const ROBINHOOD_CHAIN_ID = 4663;
 export const ROBINHOOD_CHAIN_HEX = '0x' + ROBINHOOD_CHAIN_ID.toString(16); // 0x1237
+const USER_DISCONNECTED_STORAGE_KEY = 'binara.wallet.userDisconnected.v1';
 
 export interface TokenBalance { symbol: string; address: string; balance: string; decimals: number; usdValue?: number; }
 export interface LPPosition {
@@ -99,6 +100,15 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    // An injected wallet keeps its own authorization after the app disconnects.
+    // Persist Binara's explicit disconnect intent so a browser refresh does not
+    // silently hydrate the same account again. A later explicit Connect clears it.
+    try {
+      userDisconnectedRef.current = window.localStorage.getItem(USER_DISCONNECTED_STORAGE_KEY) === '1';
+    } catch {
+      userDisconnectedRef.current = false;
+    }
+
     const discovered = new Map<string, WalletProviderInfo>();
     let cancelled = false;
     const addProvider = (detail: EIP6963ProviderDetail) => {
@@ -134,6 +144,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   const connect = useCallback(async (selected?: WalletProviderInfo) => {
     userDisconnectedRef.current = false;
+    try { window.localStorage.removeItem(USER_DISCONNECTED_STORAGE_KEY); } catch { /* storage may be unavailable */ }
     const provider = selected?.provider ?? activeProviderRef.current ?? window.ethereum;
     if (!provider) {
       setPartial({ error: 'No compatible wallet detected. Install a browser wallet extension or use a wallet that supports EIP-6963.' });
@@ -155,6 +166,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   const disconnect = useCallback(() => {
     userDisconnectedRef.current = true;
+    try { window.localStorage.setItem(USER_DISCONNECTED_STORAGE_KEY, '1'); } catch { /* storage may be unavailable */ }
     const provider = activeProviderRef.current;
     if (provider) {
       provider.removeListener?.('accountsChanged', handleAccountsChanged);
