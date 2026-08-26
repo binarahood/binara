@@ -1,6 +1,7 @@
 'use client';
 
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createCoinbaseWalletProvider, createWalletConnectProvider, ensureRobinhoodChain, hasWalletConnectProjectId } from '@/lib/externalWallets';
 
 export const ROBINHOOD_CHAIN_ID = 4663;
 export const ROBINHOOD_CHAIN_HEX = '0x' + ROBINHOOD_CHAIN_ID.toString(16); // 0x1237
@@ -13,26 +14,24 @@ export interface LPPosition {
   rangeUpper: number; distToLower: number; distToUpper: number; protocol?: string; positionId?: string; unrealizedPnl?: number;
   realizedPnl?: number; entryDataAvailable?: boolean;
 }
-export interface WalletProviderInfo { uuid: string; name: string; icon: string; rdns?: string; provider: EthereumProvider; }
+export type ExternalWalletKind = 'coinbase' | 'walletconnect';
+export interface EthereumProvider {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+  on?: (event: string, handler: (...args: unknown[]) => void) => void;
+  removeListener?: (event: string, handler: (...args: unknown[]) => void) => void;
+  disconnect?: () => Promise<void> | void;
+  isMetaMask?: boolean;
+  isTronLink?: boolean;
+}
+export interface WalletProviderInfo { uuid: string; name: string; icon: string; rdns?: string; provider: EthereumProvider; kind?: ExternalWalletKind; }
 export interface WalletState {
   isConnected: boolean; isConnecting: boolean; account: string | null; chainId: number | null; isCorrectChain: boolean;
   ethBalance: string | null; tokenBalances: TokenBalance[]; lpPositions: LPPosition[]; isSwitchingChain: boolean;
   isLoadingBalances: boolean; error: string | null; walletName: string | null; availableWallets: WalletProviderInfo[];
 }
-interface EthereumProvider {
-  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
-  on?: (event: string, handler: (...args: unknown[]) => void) => void;
-  removeListener?: (event: string, handler: (...args: unknown[]) => void) => void;
-  isMetaMask?: boolean;
-  isTronLink?: boolean;
-}
 type EIP6963ProviderDetail = { info: { uuid: string; name: string; icon: string; rdns: string }; provider: EthereumProvider; };
 declare global {
-  interface Window {
-    ethereum?: EthereumProvider;
-    tron?: EthereumProvider;
-    tronLink?: EthereumProvider;
-  }
+  interface Window { ethereum?: EthereumProvider; tron?: EthereumProvider; tronLink?: EthereumProvider; }
 }
 type WalletActions = { connect: (provider?: WalletProviderInfo) => Promise<void>; disconnect: () => void; switchToRobinhoodChain: () => Promise<void>; };
 type WalletContextValue = WalletState & WalletActions;
@@ -50,6 +49,7 @@ function isTronLinkProvider(detail: EIP6963ProviderDetail) {
 function isInjectedTronLink(provider: EthereumProvider) {
   return Boolean(provider.isTronLink) || provider === window.tron || provider === window.tronLink;
 }
+const pseudoProvider = {} as EthereumProvider;
 
 export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<WalletState>(EMPTY_STATE);
@@ -115,11 +115,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    try {
-      userDisconnectedRef.current = window.localStorage.getItem(USER_DISCONNECTED_STORAGE_KEY) === '1';
-    } catch {
-      userDisconnectedRef.current = false;
-    }
+    try { userDisconnectedRef.current = window.localStorage.getItem(USER_DISCONNECTED_STORAGE_KEY) === '1'; }
+    catch { userDisconnectedRef.current = false; }
 
     const discovered = new Map<string, WalletProviderInfo>();
     let cancelled = false;
@@ -138,9 +135,19 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     }
     const hydrateFirst = async () => {
       await new Promise((resolve) => setTimeout(resolve, 250));
-      if (cancelled || userDisconnectedRef.current) return;
-      const wallets = Array.from(discovered.values());
-      for (const wallet of wallets) {
+      if (cancelled) return;
+      const externalWallets: WalletProviderInfo[] = [
+        { uuid: 'coinbase-wallet-sdk', name: 'Coinbase Wallet', icon: '', rdns: 'com.coinbase.wallet', provider: pseudoProvider, kind: 'coinbase' },
+        { uuid: 'walletconnect', name: 'WalletConnect', icon: '', rdns: 'com.walletconnect', provider: pseudoProvider, kind: 'walletconnect' },
+      ];
+      const discoveredValues = Array.from(discovered.values());
+      const hasCoinbaseInjected = discoveredValues.some((wallet) => wallet.name.toLowerCase().includes('coinbase'));
+      const merged = [...discoveredValues.filter((wallet) => !wallet.name.toLowerCase().includes('tronlink'))];
+      if (!hasCoinbaseInjected) merged.push(externalWallets[0]);
+      merged.push(externalWallets[1]);
+      setState((prev) => ({ ...prev, availableWallets: merged }));
+      if (userDisconnectedRef.current) return;
+      for (const wallet of discoveredValues) {
         if (await hydrate(wallet.provider, wallet.name)) break;
       }
     };
@@ -159,19 +166,28 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const connect = useCallback(async (selected?: WalletProviderInfo) => {
     userDisconnectedRef.current = false;
     try { window.localStorage.removeItem(USER_DISCONNECTED_STORAGE_KEY); } catch { /* storage may be unavailable */ }
-    const provider = selected?.provider ?? activeProviderRef.current ?? window.ethereum;
-    if (!provider || isInjectedTronLink(provider)) {
-      setPartial({ error: 'No compatible EVM wallet detected. TronLink is not supported by Binara.' });
-      return;
-    }
     setPartial({ isConnecting: true, error: null });
     try {
+      let provider: EthereumProvider;
+      let selectedName = selected?.name ?? state.walletName ?? 'Browser Wallet';
+      if (selected?.kind === 'coinbase') {
+        provider = await createCoinbaseWalletProvider();
+        selectedName = 'Coinbase Wallet';
+      } else if (selected?.kind === 'walletconnect') {
+        provider = await createWalletConnectProvider();
+        selectedName = 'WalletConnect';
+      } else {
+        provider = selected?.provider ?? activeProviderRef.current ?? window.ethereum as EthereumProvider;
+        if (!provider || isInjectedTronLink(provider)) throw new Error('No compatible EVM wallet detected. TronLink is not supported by Binara.');
+      }
+
       const accounts = (await provider.request({ method: 'eth_requestAccounts' })) as string[];
       if (!accounts?.length) throw new Error('No wallet account was returned.');
+      await ensureRobinhoodChain(provider);
       const chainIdHex = (await provider.request({ method: 'eth_chainId' })) as string;
       const id = parseInt(chainIdHex, 16);
-      attachProvider(provider, selected?.name ?? state.walletName ?? (provider.isMetaMask ? 'MetaMask' : 'Browser Wallet'));
-      setPartial({ account: accounts[0], isConnected: true, chainId: id, isCorrectChain: id === ROBINHOOD_CHAIN_ID, isConnecting: false, walletName: selected?.name ?? state.walletName ?? 'Browser Wallet' });
+      attachProvider(provider, selectedName);
+      setPartial({ account: accounts[0], isConnected: true, chainId: id, isCorrectChain: id === ROBINHOOD_CHAIN_ID, isConnecting: false, walletName: selectedName });
       await loadBalances(accounts[0]);
     } catch (err: unknown) {
       setPartial({ isConnecting: false, error: err instanceof Error ? err.message : 'Connection failed' });
@@ -185,6 +201,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     if (provider) {
       provider.removeListener?.('accountsChanged', handleAccountsChanged);
       provider.removeListener?.('chainChanged', handleChainChanged);
+      void provider.disconnect?.();
     }
     activeProviderRef.current = null;
     setActiveProvider(null);
@@ -195,17 +212,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     const provider = activeProviderRef.current ?? window.ethereum;
     if (!provider || isInjectedTronLink(provider)) return;
     setPartial({ isSwitchingChain: true });
-    try {
-      await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: ROBINHOOD_CHAIN_HEX }] });
-    } catch (switchError: unknown) {
-      if ((switchError as { code?: number }).code === 4902) {
-        try {
-          await provider.request({ method: 'wallet_addEthereumChain', params: [{ chainId: ROBINHOOD_CHAIN_HEX, chainName: 'Robinhood Chain', nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 }, rpcUrls: ['https://rpc.mainnet.chain.robinhood.com'], blockExplorerUrls: ['https://robinhoodchain.blockscout.com'] }] });
-        } catch (addError: unknown) {
-          setPartial({ error: addError instanceof Error ? addError.message : 'Failed to add chain' });
-        }
-      } else setPartial({ error: switchError instanceof Error ? switchError.message : 'Failed to switch network' });
-    } finally { setPartial({ isSwitchingChain: false }); }
+    try { await ensureRobinhoodChain(provider); }
+    catch (switchError: unknown) { setPartial({ error: switchError instanceof Error ? switchError.message : 'Failed to switch network' }); }
+    finally { setPartial({ isSwitchingChain: false }); }
   }, [setPartial]);
 
   const value = useMemo<WalletContextValue>(() => ({ ...state, connect, disconnect, switchToRobinhoodChain }), [connect, disconnect, state, switchToRobinhoodChain]);
