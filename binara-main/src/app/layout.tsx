@@ -1,13 +1,14 @@
 import React from 'react';
+import { connection } from 'next/server';
 import type { Metadata, Viewport } from 'next';
 import { GeistSans } from 'geist/font/sans';
 import { GeistMono } from 'geist/font/mono';
 import '../styles/tailwind.css';
 import { Toaster } from 'sonner';
 
-// Keep the application shell request-rendered so production cannot serve
-// a previously prerendered shell after a deployment. This is important for
-// navigation/UI changes in the shared client-side AppLayout/Sidebar.
+// The shared shell contains client-side navigation. Force the root layout to
+// wait for the incoming request so Vercel/Next.js cannot reuse a stale
+// prerendered HTML shell after UI deployments.
 export const dynamic = 'force-dynamic';
 
 export const viewport: Viewport = {
@@ -30,9 +31,11 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  await connection();
+
   return (
     <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable} dark`}>
       <body className={GeistSans.className}>
