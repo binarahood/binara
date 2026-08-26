@@ -1,7 +1,7 @@
 'use client';
 
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { createCoinbaseWalletProvider, createWalletConnectProvider, ensureRobinhoodChain, hasWalletConnectProjectId } from '@/lib/externalWallets';
+import { createCoinbaseWalletProvider, ensureRobinhoodChain } from '@/lib/externalWallets';
 
 export const ROBINHOOD_CHAIN_ID = 4663;
 export const ROBINHOOD_CHAIN_HEX = '0x' + ROBINHOOD_CHAIN_ID.toString(16); // 0x1237
@@ -14,7 +14,7 @@ export interface LPPosition {
   rangeUpper: number; distToLower: number; distToUpper: number; protocol?: string; positionId?: string; unrealizedPnl?: number;
   realizedPnl?: number; entryDataAvailable?: boolean;
 }
-export type ExternalWalletKind = 'coinbase' | 'walletconnect';
+export type ExternalWalletKind = 'coinbase';
 export interface EthereumProvider {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
   on?: (event: string, handler: (...args: unknown[]) => void) => void;
@@ -136,15 +136,10 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     const hydrateFirst = async () => {
       await new Promise((resolve) => setTimeout(resolve, 250));
       if (cancelled) return;
-      const externalWallets: WalletProviderInfo[] = [
-        { uuid: 'coinbase-wallet-sdk', name: 'Coinbase Wallet', icon: '', rdns: 'com.coinbase.wallet', provider: pseudoProvider, kind: 'coinbase' },
-        { uuid: 'walletconnect', name: 'WalletConnect', icon: '', rdns: 'com.walletconnect', provider: pseudoProvider, kind: 'walletconnect' },
-      ];
       const discoveredValues = Array.from(discovered.values());
       const hasCoinbaseInjected = discoveredValues.some((wallet) => wallet.name.toLowerCase().includes('coinbase'));
       const merged = [...discoveredValues.filter((wallet) => !wallet.name.toLowerCase().includes('tronlink'))];
-      if (!hasCoinbaseInjected) merged.push(externalWallets[0]);
-      merged.push(externalWallets[1]);
+      if (!hasCoinbaseInjected) merged.push({ uuid: 'coinbase-wallet-sdk', name: 'Coinbase Wallet', icon: '', rdns: 'com.coinbase.wallet', provider: pseudoProvider, kind: 'coinbase' });
       setState((prev) => ({ ...prev, availableWallets: merged }));
       if (userDisconnectedRef.current) return;
       for (const wallet of discoveredValues) {
@@ -173,9 +168,6 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       if (selected?.kind === 'coinbase') {
         provider = await createCoinbaseWalletProvider();
         selectedName = 'Coinbase Wallet';
-      } else if (selected?.kind === 'walletconnect') {
-        provider = await createWalletConnectProvider();
-        selectedName = 'WalletConnect';
       } else {
         provider = selected?.provider ?? activeProviderRef.current ?? window.ethereum as EthereumProvider;
         if (!provider || isInjectedTronLink(provider)) throw new Error('No compatible EVM wallet detected. TronLink is not supported by Binara.');
