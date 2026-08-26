@@ -7,7 +7,6 @@ import AppLogo from '@/components/ui/AppLogo';
 import Icon from '@/components/ui/AppIcon';
 import { useChainStatus } from '@/hooks/useChainData';
 
-const PROJECT_X_URL = 'https://x.com/Binarahood';
 const CONTRACT_ADDRESS = '';
 
 interface NavItem { label: string; href: string; icon: string; badge?: number; isDemo?: boolean; }
@@ -55,7 +54,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         </Link>; })}
       </div>)}
     </nav>
-    {!collapsed && <div className="border-t border-border p-3 space-y-2"><p className="px-1 text-[10px] font-semibold tracking-widest uppercase text-muted-foreground/50">Project</p><a id="binara-x-link" data-project-link="x" href={PROJECT_X_URL} target="_blank" rel="noopener noreferrer" aria-label="Open Binara on X" title={PROJECT_X_URL} className="flex items-center gap-2 px-2 py-2 rounded-lg text-xs transition-colors text-muted-foreground hover:text-foreground hover:bg-muted/60"><span className="w-5 text-center text-sm font-semibold">𝕏</span><span className="flex-1 font-medium">X / Twitter</span><span className="text-[10px]">Open</span></a><div className="flex items-center gap-2 px-2 py-2 rounded-lg bg-muted/30 border border-border/60"><Icon name="DocumentDuplicateIcon" size={15} className="text-muted-foreground/70" /><div className="min-w-0 flex-1"><p className="text-[10px] text-muted-foreground/60 uppercase tracking-wide">Contract</p><p className="text-[11px] font-mono text-muted-foreground truncate">{CONTRACT_ADDRESS || 'Not launched'}</p></div></div></div>}
+    {!collapsed && <div className="border-t border-border p-3"><p className="px-1 text-[10px] font-semibold tracking-widest uppercase text-muted-foreground/50 mb-2">Project</p><div className="flex items-center gap-2 px-2 py-2 rounded-lg bg-muted/30 border border-border/60"><Icon name="DocumentDuplicateIcon" size={15} className="text-muted-foreground/70" /><div className="min-w-0 flex-1"><p className="text-[10px] text-muted-foreground/60 uppercase tracking-wide">Contract</p><p className="text-[11px] font-mono text-muted-foreground truncate">{CONTRACT_ADDRESS || 'Not launched'}</p></div></div></div>}
     <div className="border-t border-border p-2"><button suppressHydrationWarning onClick={onToggle} className="w-full flex items-center justify-center gap-2 px-2 py-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-all duration-150" title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}><Icon name={collapsed ? 'ChevronRightIcon' : 'ChevronLeftIcon'} size={16} />{!collapsed && <span className="text-xs">Collapse</span>}</button></div>
   </aside>;
 }
