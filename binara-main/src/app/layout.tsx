@@ -5,6 +5,11 @@ import { GeistMono } from 'geist/font/mono';
 import '../styles/tailwind.css';
 import { Toaster } from 'sonner';
 
+// Keep the application shell request-rendered so production cannot serve
+// a previously prerendered shell after a deployment. This is important for
+// navigation/UI changes in the shared client-side AppLayout/Sidebar.
+export const dynamic = 'force-dynamic';
+
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
@@ -43,7 +48,7 @@ export default function RootLayout({
             },
           }}
         />
-</body>
+      </body>
     </html>
   );
 }
