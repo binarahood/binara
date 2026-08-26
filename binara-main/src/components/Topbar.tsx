@@ -7,79 +7,46 @@ import { useWallet } from '@/hooks/useWallet';
 import { useChainStatus } from '@/hooks/useChainData';
 
 const BINARA_DAPP_URL = 'https://binarahood.xyz';
+const BINARA_X_URL = 'https://x.com/Binarahood';
+const BINARA_CA = '0xc37c77aee0945be1d6f2a4c6b9455e7a1e8b182d';
 const METAMASK_DAPP_URL = `https://metamask.app.link/dapp/${BINARA_DAPP_URL.replace(/^https?:\/\//, '')}`;
 const PHANTOM_DAPP_URL = `https://phantom.app/ul/browse/${BINARA_DAPP_URL}`;
 const COINBASE_DAPP_URL = `https://go.cb-w.com/dapp?cb_url=${encodeURIComponent(BINARA_DAPP_URL)}`;
-const MOBILE_WALLET_CHOOSER_VERSION = '2026-08-26-v2';
+const MOBILE_WALLET_CHOOSER_VERSION = '2026-08-26-v3';
 
-function shortenAddress(addr: string) {
-  return addr.slice(0, 6) + '…' + addr.slice(-4);
-}
-
-function formatEth(val: string | null) {
-  if (!val) return '—';
-  return parseFloat(val).toFixed(4) + ' ETH';
-}
+function shortenAddress(addr: string) { return addr.slice(0, 6) + '…' + addr.slice(-4); }
+function formatEth(val: string | null) { if (!val) return '—'; return parseFloat(val).toFixed(4) + ' ETH'; }
 
 function DataStatusBadge() {
   const { chainStatus } = useChainStatus();
   const [secondsAgo, setSecondsAgo] = useState<number | null>(null);
-
-  useEffect(() => {
-    const id = setInterval(() => {
-      if (chainStatus.lastUpdated) {
-        setSecondsAgo(Math.floor((Date.now() - chainStatus.lastUpdated) / 1000));
-      }
-    }, 1000);
-    return () => clearInterval(id);
-  }, [chainStatus.lastUpdated]);
-
-  if (chainStatus.status === 'connecting') {
-    return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-muted/40 border border-border"><div className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse" /><span className="text-xs text-muted-foreground font-semibold">CONNECTING</span></div>;
-  }
-  if (chainStatus.status === 'error') {
-    return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-destructive/10 border border-destructive" title={chainStatus.error ?? undefined}><div className="w-2 h-2 rounded-full bg-destructive" /><span className="text-xs text-destructive font-semibold">DATA CONNECTION ERROR</span></div>;
-  }
-  if (chainStatus.status === 'stale') {
-    return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-warning-subtle border border-warning"><div className="w-2 h-2 rounded-full bg-warning" /><span className="text-xs text-warning font-semibold">STALE DATA</span></div>;
-  }
+  useEffect(() => { const id = setInterval(() => { if (chainStatus.lastUpdated) setSecondsAgo(Math.floor((Date.now() - chainStatus.lastUpdated) / 1000)); }, 1000); return () => clearInterval(id); }, [chainStatus.lastUpdated]);
+  if (chainStatus.status === 'connecting') return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-muted/40 border border-border"><div className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse" /><span className="text-xs text-muted-foreground font-semibold">CONNECTING</span></div>;
+  if (chainStatus.status === 'error') return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-destructive/10 border border-destructive" title={chainStatus.error ?? undefined}><div className="w-2 h-2 rounded-full bg-destructive" /><span className="text-xs text-destructive font-semibold">DATA CONNECTION ERROR</span></div>;
+  if (chainStatus.status === 'stale') return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-warning-subtle border border-warning"><div className="w-2 h-2 rounded-full bg-warning" /><span className="text-xs text-warning font-semibold">STALE DATA</span></div>;
   return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-positive-subtle border border-positive/30"><div className="live-dot" /><span className="text-xs text-positive font-semibold">LIVE{secondsAgo !== null ? ` • Updated ${secondsAgo}s ago` : ' DATA'}</span></div>;
 }
 
-function isMobileDevice() {
-  if (typeof navigator === 'undefined') return false;
-  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || ('ontouchstart' in window && window.innerWidth < 1024);
-}
+function isMobileDevice() { if (typeof navigator === 'undefined') return false; return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || ('ontouchstart' in window && window.innerWidth < 1024); }
 
 interface WalletOptionProps { icon: string; name: string; description: string; onClick: () => void; }
-function WalletOption({ icon, name, description, onClick }: WalletOptionProps) {
-  return <button type="button" onClick={onClick} className="w-full flex items-center gap-3 p-3.5 rounded-xl border border-border bg-card hover:bg-muted/50 active:bg-muted/70 transition-colors text-left"><span className="w-11 h-11 shrink-0 rounded-xl bg-muted flex items-center justify-center text-xl font-semibold">{icon}</span><span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-foreground">{name}</span><span className="block text-xs text-muted-foreground mt-0.5">{description}</span></span><Icon name="ChevronRightIcon" size={18} className="text-muted-foreground shrink-0" /></button>;
-}
+function WalletOption({ icon, name, description, onClick }: WalletOptionProps) { return <button type="button" onClick={onClick} className="w-full flex items-center gap-3 p-3.5 rounded-xl border border-border bg-card hover:bg-muted/50 active:bg-muted/70 transition-colors text-left"><span className="w-11 h-11 shrink-0 rounded-xl bg-muted flex items-center justify-center text-xl font-semibold">{icon}</span><span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-foreground">{name}</span><span className="block text-xs text-muted-foreground mt-0.5">{description}</span></span><Icon name="ChevronRightIcon" size={18} className="text-muted-foreground shrink-0" /></button>; }
 
 export default function Topbar() {
   const [walletOpen, setWalletOpen] = useState(false);
   const [walletChooserOpen, setWalletChooserOpen] = useState(false);
+  const [copiedCa, setCopiedCa] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const { chainStatus } = useChainStatus();
   const { isConnected, isConnecting, account, chainId, isCorrectChain, ethBalance, tokenBalances, lpPositions, isSwitchingChain, isLoadingBalances, connect, disconnect, switchToRobinhoodChain } = useWallet();
 
-  useEffect(() => {
-    function handleClick(e: MouseEvent) { if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) setWalletOpen(false); }
-    if (walletOpen) document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [walletOpen]);
-
-  useEffect(() => {
-    if (!walletChooserOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setWalletChooserOpen(false); };
-    document.addEventListener('keydown', onKeyDown);
-    document.body.style.overflow = 'hidden';
-    return () => { document.removeEventListener('keydown', onKeyDown); document.body.style.overflow = ''; };
-  }, [walletChooserOpen]);
+  useEffect(() => { function handleClick(e: MouseEvent) { if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) setWalletOpen(false); } if (walletOpen) document.addEventListener('mousedown', handleClick); return () => document.removeEventListener('mousedown', handleClick); }, [walletOpen]);
+  useEffect(() => { if (!walletChooserOpen) return; const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setWalletChooserOpen(false); }; document.addEventListener('keydown', onKeyDown); document.body.style.overflow = 'hidden'; return () => { document.removeEventListener('keydown', onKeyDown); document.body.style.overflow = ''; }; }, [walletChooserOpen]);
 
   const handleConnectClick = () => { if (isMobileDevice()) { setWalletChooserOpen(true); return; } connect(); };
   const openMobileWallet = (url: string) => { setWalletChooserOpen(false); window.location.href = url; };
   const connectCoinbase = () => { if (typeof window !== 'undefined' && window.ethereum) { setWalletChooserOpen(false); connect(); return; } openMobileWallet(COINBASE_DAPP_URL); };
+  const copyContract = async () => { try { await navigator.clipboard.writeText(BINARA_CA); setCopiedCa(true); window.setTimeout(() => setCopiedCa(false), 1800); } catch { setCopiedCa(false); } };
 
   return <>
     <header className="h-16 flex items-center justify-between px-6 border-b border-border bg-card/80 backdrop-blur-sm sticky top-0 z-30">
@@ -87,6 +54,10 @@ export default function Topbar() {
       <div className="flex items-center gap-2">
         <Link href="/pool-scanner" className="btn-ghost" title="Open Pool Scanner"><Icon name="MagnifyingGlassIcon" size={16} /><span className="hidden md:inline text-xs">Pool Scanner</span></Link>
         {chainStatus.blockNumber && <div className="hidden xl:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted/40 border border-border"><Icon name="CubeIcon" size={12} className="text-muted-foreground" /><span className="text-xs text-muted-foreground font-mono-nums">#{chainStatus.blockNumber.toLocaleString()}</span></div>}
+        <Link href={BINARA_X_URL} target="_blank" rel="noopener noreferrer" aria-label="Binara on X" className="flex items-center justify-center w-8 h-8 rounded-lg border border-border bg-card hover:bg-muted transition-colors text-foreground font-semibold" title="Binara on X">𝕏</Link>
+        <button type="button" onClick={copyContract} aria-label="Copy Binara contract address" title={copiedCa ? 'Contract address copied' : 'Copy contract address'} className="flex items-center gap-1.5 max-w-[180px] sm:max-w-[260px] px-2.5 py-1.5 rounded-lg border border-border bg-card hover:bg-muted transition-colors text-xs font-mono text-foreground">
+          <span className="hidden sm:inline text-muted-foreground font-sans">CA:</span><span className="truncate">{BINARA_CA}</span><Icon name={copiedCa ? 'CheckIcon' : 'ClipboardDocumentIcon'} size={14} className="shrink-0 text-muted-foreground" />
+        </button>
         {isConnected && !isCorrectChain && <button suppressHydrationWarning onClick={switchToRobinhoodChain} disabled={isSwitchingChain} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-destructive/10 border border-destructive text-destructive text-xs font-semibold hover:bg-destructive/20 transition-colors disabled:opacity-60" title={`Wrong network (chain ${chainId}). Click to switch to Robinhood Chain (4663)`}><Icon name="ExclamationTriangleIcon" size={13} /><span className="hidden sm:inline">{isSwitchingChain ? 'Switching…' : 'Wrong Network'}</span></button>}
         {!isConnected ? <button suppressHydrationWarning onClick={handleConnectClick} disabled={isConnecting} className="btn-primary text-xs px-3 py-1.5 disabled:opacity-60"><Icon name="WalletIcon" size={14} /><span className="hidden sm:inline">{isConnecting ? 'Connecting…' : 'Connect Wallet'}</span></button> : <div className="relative" ref={dropdownRef}><button suppressHydrationWarning onClick={() => setWalletOpen(v => !v)} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${isCorrectChain ? 'bg-positive-subtle border-positive text-positive hover:bg-positive/20' : 'bg-muted/40 border-border text-muted-foreground hover:bg-muted/60'}`}><span className={`w-2 h-2 rounded-full flex-shrink-0 ${isCorrectChain ? 'bg-positive' : 'bg-muted-foreground'}`} /><span className="hidden sm:inline font-mono-nums">{shortenAddress(account!)}</span><Icon name="ChevronDownIcon" size={12} /></button>{walletOpen && <div className="absolute right-0 top-full mt-2 w-80 rounded-xl bg-card border border-border shadow-2xl z-50 overflow-hidden"><div className="px-4 py-3 border-b border-border flex items-center justify-between"><div><p className="text-xs text-muted-foreground mb-0.5">Connected Account</p><p className="text-sm font-mono-nums text-foreground font-semibold">{shortenAddress(account!)}</p></div><div className="text-right"><p className="text-xs text-muted-foreground mb-0.5">Network</p>{isCorrectChain ? <span className="text-xs font-semibold text-positive flex items-center gap-1 justify-end"><span className="w-1.5 h-1.5 rounded-full bg-positive inline-block" />Robinhood Chain</span> : <span className="text-xs font-semibold text-destructive">Chain {chainId}</span>}</div></div><div className="px-4 py-3 border-b border-border"><p className="text-xs text-muted-foreground mb-1">ETH Balance</p>{isLoadingBalances ? <div className="h-5 w-24 rounded bg-muted animate-pulse" /> : <p className="text-lg font-bold text-foreground font-mono-nums">{formatEth(ethBalance)}</p>}</div>{tokenBalances.length > 0 && <div className="px-4 py-3 border-b border-border"><p className="text-xs text-muted-foreground mb-2">Token Balances</p><div className="space-y-1.5">{tokenBalances.map(t => <div key={t.symbol} className="flex items-center justify-between"><span className="text-xs font-semibold text-foreground">{t.symbol}</span><span className="text-xs font-mono-nums text-foreground">{t.balance}</span></div>)}</div></div>}<div className="px-4 py-3"><button suppressHydrationWarning onClick={() => { disconnect(); setWalletOpen(false); }} className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-destructive/10 border border-destructive/30 text-destructive text-xs font-semibold hover:bg-destructive/20 transition-colors"><Icon name="ArrowRightOnRectangleIcon" size={13} />Disconnect Wallet</button></div></div>}</div>}
       </div>
