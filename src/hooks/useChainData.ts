@@ -51,15 +51,14 @@ export function usePoolsData(intervalMs = POOL_INTERVAL_MS, visibilityMode: Pool
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [indexerStatus, setIndexerStatus] = useState<string | null>(null);
   const enrichmentInFlight = useRef(false);
-  const baseRequestId = useRef(0);
 
-  const fetchEnrichment = useCallback(async (requestId: number) => {
+  const fetchEnrichment = useCallback(async () => {
     if (enrichmentInFlight.current) return;
     enrichmentInFlight.current = true;
     try {
       const res = await fetch('/api/chain/pools/enrich', { cache: 'no-store' });
       const data = await res.json();
-      if (!res.ok || data.error || requestId !== baseRequestId.current) return;
+      if (!res.ok || data.error) return;
       const enriched = (data.pools || []) as LivePool[];
       setPools((current) => {
         const merged = mergePools(current, enriched).map((pool) => ({ ...pool, visibility: getPoolVisibility(pool) }));
@@ -76,7 +75,6 @@ export function usePoolsData(intervalMs = POOL_INTERVAL_MS, visibilityMode: Pool
   }, [visibilityMode]);
 
   const fetchPools = useCallback(async () => {
-    const requestId = ++baseRequestId.current;
     try {
       const res = await fetch('/api/chain/pools', { cache: 'no-store' }); const data = await res.json();
       if (!res.ok || data.error) { setError(data.error || 'Unable to retrieve live Robinhood Chain data.'); setIsLoading(false); return; }
@@ -84,7 +82,7 @@ export function usePoolsData(intervalMs = POOL_INTERVAL_MS, visibilityMode: Pool
       const classified = rawPools.map((pool) => ({ ...pool, visibility: getPoolVisibility(pool) }));
       const visiblePools = classified.filter((pool) => visibilityMode === 'all' || pool.visibility === visibilityMode);
       setPools(visiblePools); setDashboardMetrics(computeDashboardMetrics(classified.filter((p) => p.visibility === 'active'))); setLastUpdated(Date.now()); setIndexerStatus(data.indexer?.status ?? null); setError(null); setIsLoading(false);
-      void fetchEnrichment(requestId);
+      void fetchEnrichment();
     } catch { setError('Unable to retrieve live Robinhood Chain data.'); setIsLoading(false); }
   }, [fetchEnrichment, visibilityMode]);
 
