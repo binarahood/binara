@@ -24,9 +24,16 @@ interface EthereumProvider {
   on?: (event: string, handler: (...args: unknown[]) => void) => void;
   removeListener?: (event: string, handler: (...args: unknown[]) => void) => void;
   isMetaMask?: boolean;
+  isTronLink?: boolean;
 }
 type EIP6963ProviderDetail = { info: { uuid: string; name: string; icon: string; rdns: string }; provider: EthereumProvider; };
-declare global { interface Window { ethereum?: EthereumProvider; } }
+declare global {
+  interface Window {
+    ethereum?: EthereumProvider;
+    tron?: EthereumProvider;
+    tronLink?: EthereumProvider;
+  }
+}
 type WalletActions = { connect: (provider?: WalletProviderInfo) => Promise<void>; disconnect: () => void; switchToRobinhoodChain: () => Promise<void>; };
 type WalletContextValue = WalletState & WalletActions;
 const WalletContext = createContext<WalletContextValue | null>(null);
@@ -35,6 +42,14 @@ const EMPTY_STATE: WalletState = {
   tokenBalances: [], lpPositions: [], isSwitchingChain: false, isLoadingBalances: false, error: null, walletName: null, availableWallets: [],
 };
 function providerKey(detail: EIP6963ProviderDetail) { return detail.info.uuid || detail.info.rdns || detail.info.name; }
+function isTronLinkProvider(detail: EIP6963ProviderDetail) {
+  const name = detail.info.name?.trim().toLowerCase();
+  const rdns = detail.info.rdns?.trim().toLowerCase();
+  return name === 'tronlink' || rdns === 'org.tronlink.www' || Boolean(detail.provider.isTronLink);
+}
+function isInjectedTronLink(provider: EthereumProvider) {
+  return Boolean(provider.isTronLink) || provider === window.tron || provider === window.tronLink;
+}
 
 export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<WalletState>(EMPTY_STATE);
@@ -84,7 +99,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   }, [handleAccountsChanged, handleChainChanged, setPartial]);
 
   const hydrate = useCallback(async (provider: EthereumProvider, walletName: string) => {
-    if (userDisconnectedRef.current) return false;
+    if (userDisconnectedRef.current || isInjectedTronLink(provider)) return false;
     try {
       const accounts = (await provider.request({ method: 'eth_accounts' })) as string[];
       if (!accounts?.length || userDisconnectedRef.current) return false;
@@ -100,9 +115,6 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    // An injected wallet keeps its own authorization after the app disconnects.
-    // Persist Binara's explicit disconnect intent so a browser refresh does not
-    // silently hydrate the same account again. A later explicit Connect clears it.
     try {
       userDisconnectedRef.current = window.localStorage.getItem(USER_DISCONNECTED_STORAGE_KEY) === '1';
     } catch {
@@ -112,7 +124,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     const discovered = new Map<string, WalletProviderInfo>();
     let cancelled = false;
     const addProvider = (detail: EIP6963ProviderDetail) => {
-      if (!detail?.provider || !detail.info?.name) return;
+      if (!detail?.provider || !detail.info?.name || isTronLinkProvider(detail)) return;
       const key = providerKey(detail);
       if (discovered.has(key)) return;
       discovered.set(key, { uuid: detail.info.uuid, name: detail.info.name, icon: detail.info.icon, rdns: detail.info.rdns, provider: detail.provider });
@@ -121,7 +133,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     const onAnnounce = (event: Event) => addProvider((event as CustomEvent<EIP6963ProviderDetail>).detail);
     window.addEventListener('eip6963:announceProvider', onAnnounce);
     window.dispatchEvent(new Event('eip6963:requestProvider'));
-    if (window.ethereum) addProvider({ info: { uuid: 'injected', name: window.ethereum.isMetaMask ? 'MetaMask' : 'Browser Wallet', icon: '', rdns: 'injected' }, provider: window.ethereum });
+    if (window.ethereum && !isInjectedTronLink(window.ethereum)) {
+      addProvider({ info: { uuid: 'injected', name: window.ethereum.isMetaMask ? 'MetaMask' : 'Browser Wallet', icon: '', rdns: 'injected' }, provider: window.ethereum });
+    }
     const hydrateFirst = async () => {
       await new Promise((resolve) => setTimeout(resolve, 250));
       if (cancelled || userDisconnectedRef.current) return;
@@ -146,8 +160,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     userDisconnectedRef.current = false;
     try { window.localStorage.removeItem(USER_DISCONNECTED_STORAGE_KEY); } catch { /* storage may be unavailable */ }
     const provider = selected?.provider ?? activeProviderRef.current ?? window.ethereum;
-    if (!provider) {
-      setPartial({ error: 'No compatible wallet detected. Install a browser wallet extension or use a wallet that supports EIP-6963.' });
+    if (!provider || isInjectedTronLink(provider)) {
+      setPartial({ error: 'No compatible EVM wallet detected. TronLink is not supported by Binara.' });
       return;
     }
     setPartial({ isConnecting: true, error: null });
@@ -179,7 +193,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   const switchToRobinhoodChain = useCallback(async () => {
     const provider = activeProviderRef.current ?? window.ethereum;
-    if (!provider) return;
+    if (!provider || isInjectedTronLink(provider)) return;
     setPartial({ isSwitchingChain: true });
     try {
       await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: ROBINHOOD_CHAIN_HEX }] });
