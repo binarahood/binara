@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
 export const ROBINHOOD_CHAIN_ID = 4663;
 export const ROBINHOOD_CHAIN_HEX = '0x' + ROBINHOOD_CHAIN_ID.toString(16); // 0x1237
@@ -39,6 +39,14 @@ export interface LPPosition {
   entryDataAvailable?: boolean;
 }
 
+export interface WalletProviderInfo {
+  uuid: string;
+  name: string;
+  icon: string;
+  rdns?: string;
+  provider: EthereumProvider;
+}
+
 export interface WalletState {
   isConnected: boolean;
   isConnecting: boolean;
@@ -51,21 +59,35 @@ export interface WalletState {
   isSwitchingChain: boolean;
   isLoadingBalances: boolean;
   error: string | null;
+  walletName: string | null;
+  availableWallets: WalletProviderInfo[];
 }
+
+interface EthereumProvider {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+  on?: (event: string, handler: (...args: unknown[]) => void) => void;
+  removeListener?: (event: string, handler: (...args: unknown[]) => void) => void;
+  isMetaMask?: boolean;
+}
+
+type EIP6963ProviderDetail = {
+  info: {
+    uuid: string;
+    name: string;
+    icon: string;
+    rdns: string;
+  };
+  provider: EthereumProvider;
+};
 
 declare global {
   interface Window {
-    ethereum?: {
-      request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
-      on: (event: string, handler: (...args: unknown[]) => void) => void;
-      removeListener: (event: string, handler: (...args: unknown[]) => void) => void;
-      isMetaMask?: boolean;
-    };
+    ethereum?: EthereumProvider;
   }
 }
 
 type WalletActions = {
-  connect: () => Promise<void>;
+  connect: (provider?: WalletProviderInfo) => Promise<void>;
   disconnect: () => void;
   switchToRobinhoodChain: () => Promise<void>;
 };
@@ -86,180 +108,171 @@ const EMPTY_STATE: WalletState = {
   isSwitchingChain: false,
   isLoadingBalances: false,
   error: null,
+  walletName: null,
+  availableWallets: [],
 };
+
+function providerKey(detail: EIP6963ProviderDetail) {
+  return detail.info.uuid || detail.info.rdns || detail.info.name;
+}
 
 export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<WalletState>(EMPTY_STATE);
+  const [activeProvider, setActiveProvider] = useState<EthereumProvider | null>(null);
 
   const setPartial = useCallback((partial: Partial<WalletState>) => {
     setState((prev) => ({ ...prev, ...partial }));
   }, []);
 
   const loadBalances = useCallback(async (account: string) => {
-    if (!window.ethereum) return;
     setPartial({ isLoadingBalances: true, error: null });
     try {
       const res = await fetch(`/api/chain/wallet?address=${account}`, { cache: 'no-store' });
       const data = await res.json();
-
       if (!res.ok || data.error) {
-        setPartial({
-          isLoadingBalances: false,
-          error: data.error || 'Unable to retrieve wallet data from Robinhood Chain.',
-          tokenBalances: [],
-          lpPositions: [],
-        });
+        setPartial({ isLoadingBalances: false, error: data.error || 'Unable to retrieve wallet data from Robinhood Chain.', tokenBalances: [], lpPositions: [] });
         return;
       }
-
-      setPartial({
-        ethBalance: data.ethBalance ?? null,
-        tokenBalances: data.tokenBalances ?? [],
-        lpPositions: data.lpPositions ?? [],
-        isLoadingBalances: false,
-        error: null,
-      });
+      setPartial({ ethBalance: data.ethBalance ?? null, tokenBalances: data.tokenBalances ?? [], lpPositions: data.lpPositions ?? [], isLoadingBalances: false, error: null });
     } catch {
-      setPartial({
-        isLoadingBalances: false,
-        error: 'Unable to retrieve wallet data from Robinhood Chain.',
-        tokenBalances: [],
-        lpPositions: [],
-      });
+      setPartial({ isLoadingBalances: false, error: 'Unable to retrieve wallet data from Robinhood Chain.', tokenBalances: [], lpPositions: [] });
     }
   }, [setPartial]);
 
   const handleAccountsChanged = useCallback((accounts: unknown) => {
     const accs = accounts as string[];
-    if (!accs || accs.length === 0) {
-      setState(EMPTY_STATE);
+    if (!accs?.length) {
+      setState((prev) => ({ ...EMPTY_STATE, availableWallets: prev.availableWallets }));
       return;
     }
-
     setPartial({ account: accs[0], isConnected: true, error: null });
     void loadBalances(accs[0]);
   }, [loadBalances, setPartial]);
 
   const handleChainChanged = useCallback((chainIdHex: unknown) => {
-    const id = parseInt(chainIdHex as string, 16);
+    const id = parseInt(String(chainIdHex), 16);
     setPartial({ chainId: id, isCorrectChain: id === ROBINHOOD_CHAIN_ID });
   }, [setPartial]);
 
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.ethereum) return;
+  const attachProvider = useCallback((provider: EthereumProvider, walletName: string) => {
+    setActiveProvider(provider);
+    setPartial({ walletName });
+    provider.on?.('accountsChanged', handleAccountsChanged);
+    provider.on?.('chainChanged', handleChainChanged);
+  }, [handleAccountsChanged, handleChainChanged, setPartial]);
 
+  const hydrate = useCallback(async (provider: EthereumProvider, walletName: string) => {
+    try {
+      const accounts = (await provider.request({ method: 'eth_accounts' })) as string[];
+      if (!accounts?.length) return false;
+      const chainIdHex = (await provider.request({ method: 'eth_chainId' })) as string;
+      const id = parseInt(chainIdHex, 16);
+      attachProvider(provider, walletName);
+      setPartial({ account: accounts[0], isConnected: true, chainId: id, isCorrectChain: id === ROBINHOOD_CHAIN_ID, error: null, walletName });
+      void loadBalances(accounts[0]);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [attachProvider, loadBalances, setPartial]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const discovered = new Map<string, WalletProviderInfo>();
     let cancelled = false;
 
-    const hydrate = async () => {
-      try {
-        const accounts = (await window.ethereum!.request({ method: 'eth_accounts' })) as string[];
-        if (cancelled || !accounts?.length) return;
-
-        const chainIdHex = (await window.ethereum!.request({ method: 'eth_chainId' })) as string;
-        if (cancelled) return;
-
-        const id = parseInt(chainIdHex, 16);
-        setPartial({
-          account: accounts[0],
-          isConnected: true,
-          chainId: id,
-          isCorrectChain: id === ROBINHOOD_CHAIN_ID,
-          error: null,
-        });
-        void loadBalances(accounts[0]);
-      } catch {
-        // Wallet providers may reject passive account discovery; keep the UI disconnected.
-      }
+    const addProvider = (detail: EIP6963ProviderDetail) => {
+      if (!detail?.provider || !detail.info?.name) return;
+      const key = providerKey(detail);
+      if (discovered.has(key)) return;
+      discovered.set(key, { uuid: detail.info.uuid, name: detail.info.name, icon: detail.info.icon, rdns: detail.info.rdns, provider: detail.provider });
+      setState((prev) => ({ ...prev, availableWallets: Array.from(discovered.values()) }));
     };
 
-    void hydrate();
-    window.ethereum.on('accountsChanged', handleAccountsChanged);
-    window.ethereum.on('chainChanged', handleChainChanged);
+    const onAnnounce = (event: Event) => addProvider((event as CustomEvent<EIP6963ProviderDetail>).detail);
+    window.addEventListener('eip6963:announceProvider', onAnnounce);
+    window.dispatchEvent(new Event('eip6963:requestProvider'));
+
+    // Legacy fallback: browsers with one injected provider but no EIP-6963 announcement.
+    if (window.ethereum) addProvider({ info: { uuid: 'injected', name: window.ethereum.isMetaMask ? 'MetaMask' : 'Browser Wallet', icon: '', rdns: 'injected' }, provider: window.ethereum });
+
+    const hydrateFirst = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      if (cancelled) return;
+      const wallets = Array.from(discovered.values());
+      for (const wallet of wallets) {
+        if (await hydrate(wallet.provider, wallet.name)) break;
+      }
+    };
+    void hydrateFirst();
 
     return () => {
       cancelled = true;
-      window.ethereum?.removeListener('accountsChanged', handleAccountsChanged);
-      window.ethereum?.removeListener('chainChanged', handleChainChanged);
+      window.removeEventListener('eip6963:announceProvider', onAnnounce);
+      if (activeProvider) {
+        activeProvider.removeListener?.('accountsChanged', handleAccountsChanged);
+        activeProvider.removeListener?.('chainChanged', handleChainChanged);
+      }
     };
-  }, [handleAccountsChanged, handleChainChanged, loadBalances, setPartial]);
+  }, [activeProvider, handleAccountsChanged, handleChainChanged, hydrate]);
 
-  const connect = useCallback(async () => {
-    if (!window.ethereum) {
-      setPartial({ error: 'No wallet detected. Please install MetaMask or Rabby.' });
+  const connect = useCallback(async (selected?: WalletProviderInfo) => {
+    const provider = selected?.provider ?? activeProvider ?? window.ethereum;
+    if (!provider) {
+      setPartial({ error: 'No compatible wallet detected. Install a browser wallet extension or use a wallet that supports EIP-6963.' });
       return;
     }
-
     setPartial({ isConnecting: true, error: null });
     try {
-      const accounts = (await window.ethereum.request({ method: 'eth_requestAccounts' })) as string[];
+      const accounts = (await provider.request({ method: 'eth_requestAccounts' })) as string[];
       if (!accounts?.length) throw new Error('No wallet account was returned.');
-
-      const chainIdHex = (await window.ethereum.request({ method: 'eth_chainId' })) as string;
+      const chainIdHex = (await provider.request({ method: 'eth_chainId' })) as string;
       const id = parseInt(chainIdHex, 16);
-      setPartial({
-        account: accounts[0],
-        isConnected: true,
-        chainId: id,
-        isCorrectChain: id === ROBINHOOD_CHAIN_ID,
-        isConnecting: false,
-      });
+      attachProvider(provider, selected?.name ?? state.walletName ?? (provider.isMetaMask ? 'MetaMask' : 'Browser Wallet'));
+      setPartial({ account: accounts[0], isConnected: true, chainId: id, isCorrectChain: id === ROBINHOOD_CHAIN_ID, isConnecting: false, walletName: selected?.name ?? state.walletName ?? 'Browser Wallet' });
       await loadBalances(accounts[0]);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Connection failed';
       setPartial({ isConnecting: false, error: msg });
     }
-  }, [loadBalances, setPartial]);
+  }, [activeProvider, attachProvider, loadBalances, setPartial, state.walletName]);
 
   const disconnect = useCallback(() => {
-    // Clear BINARA's shared UI state without disconnecting the wallet extension itself.
-    setState(EMPTY_STATE);
-  }, []);
+    if (activeProvider) {
+      activeProvider.removeListener?.('accountsChanged', handleAccountsChanged);
+      activeProvider.removeListener?.('chainChanged', handleChainChanged);
+    }
+    setState((prev) => ({ ...EMPTY_STATE, availableWallets: prev.availableWallets }));
+    setActiveProvider(null);
+  }, [activeProvider, handleAccountsChanged, handleChainChanged]);
 
   const switchToRobinhoodChain = useCallback(async () => {
-    if (!window.ethereum) return;
+    const provider = activeProvider ?? window.ethereum;
+    if (!provider) return;
     setPartial({ isSwitchingChain: true });
     try {
-      await window.ethereum.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: ROBINHOOD_CHAIN_HEX }],
-      });
+      await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: ROBINHOOD_CHAIN_HEX }] });
     } catch (switchError: unknown) {
       if ((switchError as { code?: number }).code === 4902) {
         try {
-          await window.ethereum.request({
-            method: 'wallet_addEthereumChain',
-            params: [{
-              chainId: ROBINHOOD_CHAIN_HEX,
-              chainName: 'Robinhood Chain',
-              nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
-              rpcUrls: ['https://rpc.mainnet.chain.robinhood.com'],
-              blockExplorerUrls: ['https://robinhoodchain.blockscout.com'],
-            }],
-          });
+          await provider.request({ method: 'wallet_addEthereumChain', params: [{ chainId: ROBINHOOD_CHAIN_HEX, chainName: 'Robinhood Chain', nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 }, rpcUrls: ['https://rpc.mainnet.chain.robinhood.com'], blockExplorerUrls: ['https://robinhoodchain.blockscout.com'] }] });
         } catch (addError: unknown) {
-          const msg = addError instanceof Error ? addError.message : 'Failed to add chain';
-          setPartial({ error: msg });
+          setPartial({ error: addError instanceof Error ? addError.message : 'Failed to add chain' });
         }
+      } else {
+        setPartial({ error: switchError instanceof Error ? switchError.message : 'Failed to switch network' });
       }
     } finally {
       setPartial({ isSwitchingChain: false });
     }
-  }, [setPartial]);
+  }, [activeProvider, setPartial]);
 
-  const value: WalletContextValue = {
-    ...state,
-    connect,
-    disconnect,
-    switchToRobinhoodChain,
-  };
-
+  const value = useMemo<WalletContextValue>(() => ({ ...state, connect, disconnect, switchToRobinhoodChain }), [connect, disconnect, state, switchToRobinhoodChain]);
   return React.createElement(WalletContext.Provider, { value }, children);
 }
 
 export function useWallet(): WalletContextValue {
   const context = useContext(WalletContext);
-  if (!context) {
-    throw new Error('useWallet must be used inside WalletProvider');
-  }
+  if (!context) throw new Error('useWallet must be used inside WalletProvider');
   return context;
 }
